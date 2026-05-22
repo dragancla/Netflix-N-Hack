@@ -1461,17 +1461,88 @@ function main () {
             return script_str;
         }
 
+        /***** Necessary helper functions *****/
 
-        /***** Let's trigger Lapse *****/
+        function is_jailbroken() {
+            const cur_uid = syscall(SYSCALL.getuid);
+            const is_in_sandbox = syscall(SYSCALL.is_in_sandbox);
+            if (cur_uid === 0n && is_in_sandbox === 0n) {
+                return true;
+            } else {
+                
+                // Check if elfldr is running at 9021
+                const sockaddr_in = malloc(16);
+                const enable = malloc(4);
+                
+                const sock_fd = syscall(SYSCALL.socket, AF_INET, SOCK_STREAM, 0n);
+                if (sock_fd === 0xffffffffffffffffn) {
+                    throw new Error("socket failed: " + hex(sock_fd));
+                }
+            
+                try {
+                    write32_uncompressed(enable, 1);
+                    syscall(SYSCALL.setsockopt, sock_fd, SOL_SOCKET, SO_REUSEADDR, enable, 4n);
+            
+                    write8_uncompressed(sockaddr_in + 1n, AF_INET);
+                    write16_uncompressed(sockaddr_in + 2n, 0x3D23n);      // port 9021
+                    write32_uncompressed(sockaddr_in + 4n, 0x0100007Fn);  // 127.0.0.1
+            
+                    // Try to connect to 127.0.0.1:9021
+                    const ret = syscall(SYSCALL.connect, sock_fd, sockaddr_in, 16n);
+            
+                    if (ret === 0n) {
+                        syscall(SYSCALL.close, sock_fd);
+                        return true;
+                    } else {
+                        syscall(SYSCALL.close, sock_fd);
+                        return false;
+                    }
+                } catch (e) {
+                    syscall(SYSCALL.close, sock_fd);
+                    return false;
+                }
+            }
+        }
 
+        function get_fwversion() {
+            const buf = malloc(0x8);
+            const size = malloc(0x8);
+            write64_uncompressed(size, 0x8n);
+            
+            if (sysctlbyname("kern.sdk_version", buf, size, 0n, 0n)) {
+                const byte1 = Number(read8_uncompressed(buf + 2n));  // Minor version (first byte)
+                const byte2 = Number(read8_uncompressed(buf + 3n));  // Major version (second byte)
+                
+                const version = byte2.toString(16) + '.' + byte1.toString(16).padStart(2, '0');
+                return version;
+            }
+            
+            return null;
+        }
 
-        script = get_script("lapse.js");
-        eval(script);
-        logger.flush();
-        send_notification("elf_loader.js");
-        script = get_script("elf_loader.js");
-        eval(script);
-        logger.flush();
+        function compare_version(a, b) {
+            const [amaj, amin] = a.split('.').map(Number);
+            const [bmaj, bmin] = b.split('.').map(Number);
+            return amaj === bmaj ? amin - bmin : amaj - bmaj;
+        }
+
+        /***** Let's trigger Jailbreak *****/
+
+        FW_VERSION = get_fwversion();
+
+        if (compare_version(FW_VERSION, "10.01") > 0) {
+            script = get_script("p2jb.js");
+            eval(script);
+            logger.flush();
+        } else {
+            script = get_script("lapse.js");
+            eval(script);
+            logger.flush();
+            send_notification("elf_loader.js");
+            script = get_script("elf_loader.js");
+            eval(script);
+            logger.flush();
+        }
 
         if (!is_jailbroken()) {
             send_notification("Jailbreak didn't succeed. Reboot and Try again!");
