@@ -188,7 +188,9 @@
         function my_init_threading() {
             const setjmp_addr = libc_base + 0x58F80n;
             const jmpbuf = malloc(0x60);
+            send_notification("p2jb: Crashes in my_init_threading")
             call(setjmp_addr, jmpbuf);
+            send_notification("p2jb: my_init_threading cleared successfully");
             saved_fpu_ctrl = Number(read32(jmpbuf + 0x40n));
             saved_mxcsr = Number(read32(jmpbuf + 0x44n));
         }
