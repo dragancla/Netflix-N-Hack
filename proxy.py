@@ -134,6 +134,28 @@ def request(flow: http.HTTPFlow) -> None:
                 b"File not found: elf_loader.js",
                 {"Content-Type": "text/plain"}
             )
+
+    if "/js/p2jb.js" in flow.request.path:
+        inject_path = os.path.join(os.path.dirname(__file__), "payloads", "p2jb.js")
+        print(f"[*] Injecting JavaScript from: {inject_path}")
+
+        try:
+            with open(inject_path, "rb") as f:
+                content = f.read().replace(b"PLS_STOP_HARDCODING_IPS",proxyServerIP)
+                print(f"[+] Loaded {len(content)} bytes from p2jb.js")
+                flow.response = http.Response.make(
+                    200,
+                    content,
+                    {"Content-Type": "application/javascript"}
+                )
+        except FileNotFoundError:
+            print(f"[!] ERROR: p2jb.js not found at {inject_path}")
+            flow.response = http.Response.make(
+                404,
+                b"File not found: p2jb.js",
+                {"Content-Type": "text/plain"}
+            )
+
     # Map elfldr.elf to elfldr.elf (binary)
     if "/js/elfldr.elf" in flow.request.path:
         inject_path = os.path.join(os.path.dirname(__file__), "payloads", "elfldr.elf")
