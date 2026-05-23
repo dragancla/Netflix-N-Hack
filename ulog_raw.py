@@ -1,4 +1,8 @@
 import socket
+from datetime import datetime
+
+def ts():
+    return datetime.now().strftime('%H:%M:%S.%f')[:-3]
 
 # Define host and port
 HOST = '0.0.0.0'
@@ -13,13 +17,13 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     try:
         while True:  # Outer loop keeps the server running
             conn, addr = s.accept()
-            print(f"\n[NEW CONNECTION] Connected by {addr}")
+            print(f"\n[{ts()}] [NEW CONNECTION] Connected by {addr}")
 
             with conn:
                 while True:  # Inner loop handles data from the current client
                     data = conn.recv(1024)
                     if not data:
-                        print(f"[DISCONNECTED] Client {addr} disconnected.")
+                        print(f"[{ts()}] [DISCONNECTED] Client {addr} disconnected.")
                         break  # Breaks inner loop, returns to s.accept()
 
                     print(f"{data.decode('utf-8').strip()}")
