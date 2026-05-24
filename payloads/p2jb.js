@@ -179,6 +179,35 @@ function file_exists(path) {
     }
 }
 
+function read_file(path) {
+    const path_addr = alloc_string(path);
+    const fd = syscall(SYSCALL.open, path_addr, O_RDONLY);
+
+    if (fd === 0xffffffffffffffffn) {
+        throw new Error("file not exist: " + path);
+    }
+
+    const stat_buf = malloc(0x100);
+    const fstat_result = syscall(SYSCALL.fstat, fd, stat_buf);
+    if (fstat_result === 0xffffffffffffffffn) {
+        syscall(SYSCALL.close, fd);
+        throw new Error("fstat failed for: " + path);
+    }
+
+    const file_size = read64(stat_buf + 0x48n);
+
+    const buffer = malloc(file_size);
+    const bytes_read = syscall(SYSCALL.read, fd, buffer, file_size);
+
+    syscall(SYSCALL.close, fd);
+
+    if (bytes_read !== file_size) {
+        throw new Error("failed to read complete file: " + path);
+    }
+
+    return read_buffer(buffer, file_size);
+}
+
 function write_file(path, text) {
     const mode = 0x1ffn; // 777
     const path_addr = alloc_string(path);
