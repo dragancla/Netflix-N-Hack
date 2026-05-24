@@ -194,7 +194,7 @@ function read_file(path) {
         throw new Error("fstat failed for: " + path);
     }
 
-    const file_size = read64(stat_buf + 0x48n);
+    const file_size = read64_uncompressed(stat_buf + 0x48n);
 
     const buffer = malloc(file_size);
     const bytes_read = syscall(SYSCALL.read, fd, buffer, file_size);
