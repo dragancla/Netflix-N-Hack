@@ -1390,6 +1390,10 @@ function main () {
         }
 
 
+        function toHex(num) {
+            return '0x' + BigInt(num).toString(16).padStart(16, '0');
+        }
+
         // Arguments: script_name configured in MITM proxy
         // Returned value: JS String (null if error)
         function get_script(script_name) {
