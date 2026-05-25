@@ -196,7 +196,7 @@ function read_file(path) {
 
     const file_size = read64_uncompressed(stat_buf + 0x48n);
 
-    const buffer = malloc(file_size);
+    const buffer = malloc(Number(file_size));
     const bytes_read = syscall(SYSCALL.read, fd, buffer, file_size);
 
     syscall(SYSCALL.close, fd);
@@ -205,7 +205,7 @@ function read_file(path) {
         throw new Error("failed to read complete file: " + path);
     }
 
-    return read_buffer(buffer, file_size);
+    return read_buffer(buffer, Number(file_size));
 }
 
 function write_file(path, text) {
@@ -3311,13 +3311,16 @@ function spawn_thread(fake_rop_race1_array) {
                         if (file_exists(p)) { elf_path = p; break; }
                     }
                 }
-                if (!elf_path) {
+                if (!elf_path && typeof fetch_file === "function") {
+                    logger.log("stage_elfldr: USB not found - fetching elfldr.elf from proxy...");
+                } else if (!elf_path) {
                     logger.log("stage_elfldr: elfldr not found on /mnt/usb0../usb7");
                     send_notification("Stage 7\nelfldr_1320.elf NOT FOUND on USB\n" +
                         "(plug a FAT32/exFAT USB with elfldr_1320.elf)");
                     return;
+                } else {
+                    logger.log("stage_elfldr: found " + elf_path);
                 }
-                logger.log("stage_elfldr: found " + elf_path);
 
                 ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
                 kernel.addr.data_base = S.data_base;
@@ -3346,9 +3349,21 @@ function spawn_thread(fake_rop_race1_array) {
                 pin_pipe_fd(ipv6_kernel_rw.data.pipe_write_fd);
                 logger.log("stage_elfldr: handoff pipe + sockets pinned");
 
-                const elf_data = read_file(elf_path);
-                logger.log("stage_elfldr: read " + elf_data.length +
-                    " bytes; parsing...");
+                let elf_data;
+                if (elf_path) {
+                    elf_data = read_file(elf_path);
+                    logger.log("stage_elfldr: read " + elf_data.length + " bytes from USB; parsing...");
+                } else {
+                    const proxy_buf = malloc(400 * 1024);
+                    const proxy_size = fetch_file("elfldr.elf", proxy_buf);
+                    if (!proxy_size || proxy_size < 1000) {
+                        logger.log("stage_elfldr: proxy fetch failed (got " + proxy_size + " bytes)");
+                        send_notification("Stage 7\nelfldr proxy fetch failed");
+                        return;
+                    }
+                    logger.log("stage_elfldr: fetched " + proxy_size + " bytes from proxy; parsing...");
+                    elf_data = proxy_buf;
+                }
                 const entry = elf_parse(elf_data);
                 logger.log("stage_elfldr: elf entry=" + toHex(entry) +
                     "; spawning elfldr...");
