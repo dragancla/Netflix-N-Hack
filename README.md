@@ -205,7 +205,7 @@ Follow Sony’s official guide to restore your PS5 system from the USB:
 [https://www.playstation.com/en-us/support/hardware/back-up-ps5-data-USB/](https://www.playstation.com/en-us/support/hardware/back-up-ps5-data-USB/)
 
 
-# Firmwares <=10.01: Internet Connection Setup for Netflix
+# Firmwares <=10.01: Run online proxy
 
 ## Step 1: Open Network Settings
 1. On your console, go to:
@@ -249,10 +249,9 @@ For either **Wi-Fi** or **LAN**, continue the setup:
 
 You can now open **Netflix** safely.
 
-
-
 ---
-# Firmwares >10.01: How to run proxy locally
+
+# Firmwares >10.01: Need to run proxy locally
 
 ## Requirements
 
@@ -326,20 +325,16 @@ const ip_script_port = 8080; //port which mitmproxy is running on
 ### Prepare the USB drive
 Copy elfldr_1320.elf from the `payloads` directory to the root of your USB drive (FAT32 or exFAT), exactly as /elfldr_1320.elf. Plug it into the PS5 before launching Netflix.
 
-### Open Netflix and wait. 
+### Open Netflix and wait.
 
 
 > [!NOTE]
 If you see elfldr listening on port 9021 you can send your elf payload. 
 
-### if it fails reboot and try again
-
 ### Troubleshooting
 - If the Netflix application crashes shortly after opening it, reopen it to retry. 
 - If you see a green text error "Exception" press X or O to retry. 
 - If Lapse fails you will see a notification telling you to reboot the console, you must reboot to retry.
-
-
 
 ---
 

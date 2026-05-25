@@ -2,7 +2,7 @@
 // based on https://starlabs.sg/blog/2022/12-the-hole-new-world-how-a-small-leak-will-sink-a-great-browser-cve-2021-38003/
 // thanks to Gezines y2jb for advice and reference : https://github.com/Gezine/Y2JB/blob/main/download0/cache/splash_screen/aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY%3D/splash.html
 
-const ip_script = "192.168.1.169"; // ip address of your computer running mitmproxy, MITM Proxy is handling it --> Needs to be updated
+const ip_script = "PLS_STOP_HARDCODING_IPS"; // ip address of your computer running mitmproxy, MITM Proxy is handling it --> Needs to be updated
 const ip_script_port = 8080; //port that mitmproxy is on
 
 var is_ps4 = false; // Flag to stop execution after PS4 exploit loads
