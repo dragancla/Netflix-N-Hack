@@ -1513,9 +1513,14 @@ function main () {
             const ELF_MAPPING_ADDR        = 0x926100000n;
 
             function elf_parse(elf_data) {
-                // elf_data is a Uint8Array from read_file
-                const elf_store = malloc(elf_data.length);
-                write_buffer(elf_store, elf_data);
+                // elf_data is either a Uint8Array (from read_file/USB) or a BigInt kernel address (from fetch_file/proxy)
+                let elf_store;
+                if (typeof elf_data === 'bigint') {
+                    elf_store = elf_data;
+                } else {
+                    elf_store = malloc(elf_data.length);
+                    write_buffer(elf_store, elf_data);
+                }
 
                 const SIZE_PH = 0x38n, SIZE_SH = 0x40n, RELA_SZ = 0x18n;
 
