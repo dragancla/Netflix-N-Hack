@@ -324,13 +324,15 @@ const ip_script_port = 8080; //port which mitmproxy is running on
 > Make sure your PC running mitmproxy is on the same network and reachable at the IP you entered.
 
 ### Prepare the USB drive
-Copy elfldr_1320.elf https://github.com/matem6/P2JB-Y2JB-Porting/blob/main/elfldr_1320.elf to the root of your USB drive (FAT32 or exFAT), exactly as /elfldr_1320.elf. Plug it into the PS5 before launching Netflix.
+Copy YouTube pkg to your USB drive as stated in Y2JB instructions.
+
+Copy download0.dat from https://github.com/Gezine/Y2JB/releases/tag/1.5 (or from any other repo of your choice) to the root of your USB drive (FAT32 or exFAT), exactly as /download0.dat. Plug it into the PS5 before launching Netflix.
 
 ### Open Netflix and wait. 
 
 
 > [!NOTE]
-If you see elfldr listening on port 9021 you can send your elf payload. 
+If you see Remote JS Loader listening you can send your p2jb.js payload. 
 
 ### if it fails reboot and try again
 
@@ -352,3 +354,5 @@ If you see elfldr listening on port 9021 you can send your elf payload.
 - Rush for creating system backup, 256GB and 2TB M.2 Images, PS4 Extended Storage Images and hours of testing!!
 - [Jester](https://github.com/god-jester) for testing 2TB and devising easiest imaging method, and gathering all images for m.2!
 - [TeRex777](https://x.com/TeRex777_) for PS5 App Extended Storage method. 
+- p2jb kernel exploit (cr_ref overflow via kqueueex) — Gezine / cheburek3000
+- [wodz69](https://github.com/wodz69) for Netflix port of P2JB
