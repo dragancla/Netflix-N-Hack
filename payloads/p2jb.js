@@ -1582,7 +1582,7 @@ function spawn_thread(fake_rop_race1_array) {
         const UIO_THREAD_NUM = 4;
         const UIO_IOV_COUNT = 20n;
 
-        const LAUNCH_ELF_LOADER = true;
+        const LAUNCH_ELF_LOADER = false;
 
         const ENABLE_DEBUG_MENU = true;
         const UIO_SYSSPACE = 1n;
